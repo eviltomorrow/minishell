@@ -1,0 +1,13 @@
+[package]
+name = "minishell-ssh"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+minishell-core = { workspace = true }
+ssh2 = "0.9"
+anyhow = "1"
+dirs = "5"
+crossterm = "0.28"
+unicode-width = "0.1"
+libc = "0.2"

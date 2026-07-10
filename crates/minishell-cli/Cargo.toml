@@ -1,0 +1,18 @@
+[package]
+name = "minishell-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "minishell"
+path = "src/main.rs"
+
+[dependencies]
+minishell-core = { workspace = true }
+minishell-store = { workspace = true }
+minishell-ssh = { workspace = true }
+minishell-tui = { workspace = true }
+minishell-xlsx = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+anyhow = "1"

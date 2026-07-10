@@ -1,0 +1,10 @@
+[package]
+name = "minishell-xlsx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+minishell-core = { workspace = true }
+calamine = "0.26"
+rust_xlsxwriter = "0.67"
+anyhow = "1"

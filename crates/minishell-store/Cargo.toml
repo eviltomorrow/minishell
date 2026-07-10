@@ -1,0 +1,9 @@
+[package]
+name = "minishell-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+minishell-core = { workspace = true }
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"

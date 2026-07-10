@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/minishell-core",
+    "crates/minishell-store",
+    "crates/minishell-ssh",
+    "crates/minishell-tui",
+    "crates/minishell-xlsx",
+    "crates/minishell-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+minishell-core = { path = "crates/minishell-core" }
+minishell-store = { path = "crates/minishell-store" }
+minishell-ssh = { path = "crates/minishell-ssh" }
+minishell-tui = { path = "crates/minishell-tui" }
+minishell-xlsx = { path = "crates/minishell-xlsx" }

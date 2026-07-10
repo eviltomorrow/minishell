@@ -1,0 +1,12 @@
+[package]
+name = "minishell-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+minishell-core = { workspace = true }
+minishell-store = { workspace = true }
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+unicode-width = "0.1"
+anyhow = "1"
