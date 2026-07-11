@@ -17,6 +17,8 @@ pub struct FormField {
     pub max_length: usize,
     pub width: usize,
     pub cursor_pos: usize,
+    pub select_options: Option<Vec<String>>,
+    pub select_index: usize,
 }
 
 impl FormField {
@@ -27,6 +29,20 @@ impl FormField {
             max_length,
             width,
             cursor_pos: 0,
+            select_options: None,
+            select_index: 0,
+        }
+    }
+
+    pub fn new_select(label: &str, options: Vec<String>) -> Self {
+        FormField {
+            label: label.to_string(),
+            value: options[0].clone(),
+            max_length: 0,
+            width: 0,
+            cursor_pos: 0,
+            select_options: Some(options),
+            select_index: 0,
         }
     }
 
@@ -86,9 +102,10 @@ pub struct FormState {
 
 impl FormState {
     pub fn new_add() -> Self {
-        let fields = FORM_FIELDS.iter()
+        let mut fields: Vec<FormField> = FORM_FIELDS.iter()
             .map(|(label, max_len, width)| FormField::new(label, *max_len, *width))
             .collect();
+        fields[6] = FormField::new_select("Device:", vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()]);
         FormState { fields, step: 0, is_edit: false, target_id: None }
     }
 
@@ -106,11 +123,22 @@ impl FormState {
 
         let fields: Vec<FormField> = FORM_FIELDS.iter().enumerate()
             .map(|(i, (label, max_len, width))| {
-                let mut f = FormField::new(label, *max_len, *width);
-                let val = &values[i];
-                f.value = if val.is_empty() { "-".to_string() } else { val.clone() };
-                f.cursor_pos = f.value.len();
-                f
+                if i == 6 {
+                    let options = vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()];
+                    let val = &values[i];
+                    let idx = if val == "-" || val.is_empty() { 0 } else { options.iter().position(|o| o == val).unwrap_or(0) };
+                    let mut f = FormField::new_select(label, options);
+                    f.select_index = idx;
+                    f.value = values[i].clone();
+                    if f.value.is_empty() { f.value = "-".into(); }
+                    f
+                } else {
+                    let mut f = FormField::new(label, *max_len, *width);
+                    let val = &values[i];
+                    f.value = if val.is_empty() { "-".to_string() } else { val.clone() };
+                    f.cursor_pos = f.value.len();
+                    f
+                }
             })
             .collect();
 

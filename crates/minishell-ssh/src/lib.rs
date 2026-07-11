@@ -14,6 +14,7 @@ pub struct ConnectConfig {
     pub host: String,
     pub port: i32,
     pub timeout: Duration,
+    pub device: String,
 }
 
 pub fn connect(config: &ConnectConfig) -> Result<()> {
@@ -59,10 +60,12 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
     channel.request_pty(&term, None, Some((cols as u32, rows as u32, 0, 0)))?;
     channel.shell().context("Failed to start shell")?;
 
-    let _ = channel.write_all(
-        format!("export PS1=\"[{}] $PS1\"\n", config.host).as_bytes()
-    );
-    let _ = channel.flush();
+    if config.device == "Linux" {
+        let _ = channel.write_all(
+            format!("export PS1=\"[{}] $PS1\"\n", config.host).as_bytes()
+        );
+        let _ = channel.flush();
+    }
 
     let _ = crossterm::terminal::enable_raw_mode();
 
@@ -163,6 +166,7 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
         host: host.to_string(),
         port: machine.port,
         timeout: Duration::from_secs(10),
+        device: machine.device.clone(),
     };
 
     let start = Instant::now();

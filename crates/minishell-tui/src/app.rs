@@ -246,11 +246,31 @@ fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
     let mut lines: Vec<Line> = Vec::new();
     for (i, field) in form_state.fields.iter().enumerate() {
         let style = if i == form_state.step { styles::form_field_style() } else { Style::default() };
-        let cursor = if i == form_state.step { "▌" } else { " " };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:>12} ", field.label), style),
-            Span::styled(format!("{}{}", field.value, cursor), style),
-        ]));
+        if let Some(ref options) = field.select_options {
+            if i == form_state.step {
+                let mut spans = vec![Span::styled(format!("{:>12} ", field.label), style)];
+                for (j, opt) in options.iter().enumerate() {
+                    if j == field.select_index {
+                        spans.push(Span::styled(format!(" [{}] ", opt), styles::form_field_style()));
+                    } else {
+                        spans.push(Span::styled(format!("  {}  ", opt), styles::help_style()));
+                    }
+                }
+                spans.push(Span::styled(" ▌", style));
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:>12} ", field.label), style),
+                    Span::styled(&field.value, style),
+                ]));
+            }
+        } else {
+            let cursor = if i == form_state.step { "▌" } else { " " };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12} ", field.label), style),
+                Span::styled(format!("{}{}", field.value, cursor), style),
+            ]));
+        }
     }
 
     lines.push(Line::from(""));
@@ -409,17 +429,38 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
                 form.navigate_next();
             }
         }
-        KeyCode::Char(c) => {
-            form.fields[form.step].insert_char(c);
-        }
-        KeyCode::Backspace => {
-            form.fields[form.step].delete_char();
-        }
         KeyCode::Left => {
-            form.fields[form.step].move_cursor_left();
+            if form.fields[form.step].select_options.is_some() {
+                let field = &mut form.fields[form.step];
+                if field.select_index > 0 {
+                    field.select_index -= 1;
+                    field.value = field.select_options.as_ref().unwrap()[field.select_index].clone();
+                }
+            } else {
+                form.fields[form.step].move_cursor_left();
+            }
         }
         KeyCode::Right => {
-            form.fields[form.step].move_cursor_right();
+            if form.fields[form.step].select_options.is_some() {
+                let field = &mut form.fields[form.step];
+                let len = field.select_options.as_ref().unwrap().len();
+                if field.select_index < len - 1 {
+                    field.select_index += 1;
+                    field.value = field.select_options.as_ref().unwrap()[field.select_index].clone();
+                }
+            } else {
+                form.fields[form.step].move_cursor_right();
+            }
+        }
+        KeyCode::Char(c) => {
+            if form.fields[form.step].select_options.is_none() {
+                form.fields[form.step].insert_char(c);
+            }
+        }
+        KeyCode::Backspace => {
+            if form.fields[form.step].select_options.is_none() {
+                form.fields[form.step].delete_char();
+            }
         }
         _ => {}
     }
