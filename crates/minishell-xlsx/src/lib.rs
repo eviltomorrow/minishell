@@ -3,19 +3,91 @@ use anyhow::{Result, Context};
 use minishell_core::Machine;
 use calamine::Reader;
 
+const HEADER_BG: rust_xlsxwriter::Color = rust_xlsxwriter::Color::RGB(0x4472C4);
+const STRIPE_BG: rust_xlsxwriter::Color = rust_xlsxwriter::Color::RGB(0xD9E2F3);
+
+struct ColDef {
+    title: &'static str,
+    width: f64,
+}
+
+const TEMPLATE_COLS: &[ColDef] = &[
+    ColDef { title: "IP", width: 18.0 },
+    ColDef { title: "NAT-IP", width: 18.0 },
+    ColDef { title: "Port", width: 8.0 },
+    ColDef { title: "Username", width: 12.0 },
+    ColDef { title: "Password", width: 15.0 },
+    ColDef { title: "PrivateKey-Path", width: 22.0 },
+    ColDef { title: "Device", width: 12.0 },
+    ColDef { title: "Remark", width: 22.0 },
+];
+
+const EXPORT_COLS: &[ColDef] = &[
+    ColDef { title: "#", width: 5.0 },
+    ColDef { title: "IP", width: 18.0 },
+    ColDef { title: "NAT-IP", width: 18.0 },
+    ColDef { title: "Port", width: 8.0 },
+    ColDef { title: "Username", width: 12.0 },
+    ColDef { title: "Password", width: 15.0 },
+    ColDef { title: "PrivateKey", width: 30.0 },
+    ColDef { title: "Device", width: 12.0 },
+    ColDef { title: "Remark", width: 20.0 },
+];
+
+fn header_format() -> rust_xlsxwriter::Format {
+    rust_xlsxwriter::Format::new()
+        .set_bold()
+        .set_font_color(rust_xlsxwriter::Color::RGB(0xFFFFFF))
+        .set_background_color(HEADER_BG)
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_border_color(rust_xlsxwriter::Color::RGB(0x8DB4E2))
+}
+
+fn cell_format() -> rust_xlsxwriter::Format {
+    rust_xlsxwriter::Format::new()
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_border_color(rust_xlsxwriter::Color::RGB(0xD9D9D9))
+}
+
+fn stripe_format() -> rust_xlsxwriter::Format {
+    rust_xlsxwriter::Format::new()
+        .set_background_color(STRIPE_BG)
+        .set_align(rust_xlsxwriter::FormatAlign::VerticalCenter)
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_border_color(rust_xlsxwriter::Color::RGB(0xD9D9D9))
+}
+
+fn write_header(sheet: &mut rust_xlsxwriter::Worksheet, cols: &[ColDef]) -> Result<()> {
+    let fmt = header_format();
+    for (i, col) in cols.iter().enumerate() {
+        sheet.write_string_with_format(0, i as u16, col.title, &fmt)?;
+        sheet.set_column_width(i as u16, col.width)?;
+    }
+    sheet.set_row_height(0, 22.0)?;
+    sheet.set_freeze_panes(1, 0)?;
+    Ok(())
+}
+
+fn write_data_row(sheet: &mut rust_xlsxwriter::Worksheet, row: u32, values: &[String], is_stripe: bool) -> Result<()> {
+    let fmt = if is_stripe { stripe_format() } else { cell_format() };
+    for (col, val) in values.iter().enumerate() {
+        sheet.write_string_with_format(row, col as u16, val.as_str(), &fmt)?;
+    }
+    Ok(())
+}
+
 pub fn generate_template(path: &Path) -> Result<()> {
     let mut workbook = rust_xlsxwriter::Workbook::new();
     let sheet = workbook.add_worksheet();
 
-    let headers = ["IP", "NAT-IP", "Port", "Username", "Password", "PrivateKey-Path", "Device", "Remark"];
-    for (i, h) in headers.iter().enumerate() {
-        sheet.write_string(0, i as u16, *h)?;
-    }
+    write_header(sheet, TEMPLATE_COLS)?;
 
-    let example = ["10.0.0.1", "-", "22", "root", "your-password", "-", "Linux", "example"];
-    for (i, v) in example.iter().enumerate() {
-        sheet.write_string(1, i as u16, *v)?;
-    }
+    let example_vals: Vec<String> = ["10.0.0.1", "-", "22", "root", "your-password", "-", "Linux", "example"]
+        .iter().map(|s| s.to_string()).collect();
+    write_data_row(sheet, 1, &example_vals, false)?;
 
     workbook.save(path).context("Failed to save template")?;
     Ok(())
@@ -69,19 +141,7 @@ pub fn export_to(path: &Path, machines: &[Machine]) -> Result<()> {
     let mut workbook = rust_xlsxwriter::Workbook::new();
     let sheet = workbook.add_worksheet();
 
-    let headers = ["#", "IP", "NAT-IP", "Port", "Username", "Password", "PrivateKey", "Device", "Remark"];
-    let header_format = rust_xlsxwriter::Format::new()
-        .set_bold()
-        .set_font_color(rust_xlsxwriter::Color::RGB(0xFFFFFF))
-        .set_background_color(rust_xlsxwriter::Color::RGB(0x4472C4))
-        .set_align(rust_xlsxwriter::FormatAlign::Center);
-
-    for (i, h) in headers.iter().enumerate() {
-        sheet.write_string_with_format(0, i as u16, *h, &header_format)?;
-    }
-
-    let stripe_format = rust_xlsxwriter::Format::new()
-        .set_background_color(rust_xlsxwriter::Color::RGB(0xD9E2F3));
+    write_header(sheet, EXPORT_COLS)?;
 
     for (idx, m) in machines.iter().enumerate() {
         let row = (idx + 1) as u32;
@@ -98,21 +158,12 @@ pub fn export_to(path: &Path, machines: &[Machine]) -> Result<()> {
             m.remark.clone(),
         ];
 
-        for (col, val) in values.iter().enumerate() {
-            if idx % 2 == 1 {
-                sheet.write_string_with_format(row, col as u16, val.as_str(), &stripe_format)?;
-            } else {
-                sheet.write_string(row, col as u16, val.as_str())?;
-            }
-        }
-    }
+        let vals: Vec<String> = values.iter().map(|v| {
+            if v == "-" || v.is_empty() { "-".to_string() } else { v.clone() }
+        }).collect();
 
-    // Auto-width columns
-    for i in 0..headers.len() {
-        sheet.set_column_width(i as u16, 15.0)?;
+        write_data_row(sheet, row, &vals, idx % 2 == 1)?;
     }
-
-    sheet.set_freeze_panes(1, 0)?;
 
     workbook.save(path).context("Failed to save export")?;
     Ok(())

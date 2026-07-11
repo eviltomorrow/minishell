@@ -1,17 +1,47 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Row, Table};
-use ratatui::Terminal;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use minishell_core::Machine;
+use unicode_width::UnicodeWidthStr;
 
-pub struct SelectorState {
-    machines: Vec<Machine>,
-    cursor: usize,
-    selected: Option<Machine>,
-    quitting: bool,
+struct Col {
+    title: &'static str,
+    width: usize,
+}
+
+const COLS: &[Col] = &[
+    Col { title: "#", width: 4 },
+    Col { title: "IP", width: 15 },
+    Col { title: "NAT-IP", width: 12 },
+    Col { title: "Port", width: 6 },
+    Col { title: "User", width: 10 },
+    Col { title: "Remark", width: 20 },
+];
+
+fn pad_str(s: &str, width: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        let mut r = String::new();
+        let mut cw = 0;
+        for c in s.chars() {
+            let cw2 = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if cw + cw2 > width { break; }
+            r.push(c);
+            cw += cw2;
+        }
+        return r;
+    }
+    format!("{}{}", s, " ".repeat(width - w))
+}
+
+fn format_row(idx: usize, m: &Machine) -> String {
+    let parts: Vec<String> = [
+        pad_str(&format!("{}", idx + 1), COLS[0].width),
+        pad_str(&m.ip, COLS[1].width),
+        pad_str(&m.nat_ip, COLS[2].width),
+        pad_str(&format!("{}", m.port), COLS[3].width),
+        pad_str(&m.username, COLS[4].width),
+        pad_str(&m.remark, COLS[5].width),
+    ].to_vec();
+    parts.join("")
 }
 
 pub fn select_machine(machines: Vec<Machine>) -> anyhow::Result<Option<Machine>> {
@@ -22,130 +52,104 @@ pub fn select_machine(machines: Vec<Machine>) -> anyhow::Result<Option<Machine>>
         return Ok(Some(machines.into_iter().next().unwrap()));
     }
 
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    use std::io::Write;
+    let machine_count = machines.len();
 
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
-        default_hook(info);
-    }));
+    let row_strs: Vec<String> = machines.iter().enumerate()
+        .map(|(i, m)| format_row(i, m))
+        .collect();
 
-    let result = select_inner(&mut terminal, machines);
+    // Print everything inline — no clearing
+    println!();
+    println!(
+        "  \x1b[1;36m选择要登录的机器\x1b[0m \x1b[1;32m(↑↓\x1b[0m\x1b[90m 导航\x1b[0m \
+         \x1b[1;32mEnter\x1b[0m\x1b[90m 选择\x1b[0m \x1b[1;32mEsc\x1b[0m\x1b[90m 取消)\x1b[0m"
+    );
+    println!();
 
-    let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
+    let bold_cyan = "\x1b[1;36m";
+    let reset = "\x1b[0m";
+    let header: String = COLS.iter().map(|c| format!("{}{}{}", bold_cyan, pad_str(c.title, c.width), reset)).collect();
+    println!("  {}", header);
 
-    result
-}
+    let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
+    println!("\x1b[90m{}\x1b[0m", "─".repeat(term_w as usize));
 
-fn select_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, machines: Vec<Machine>) -> anyhow::Result<Option<Machine>> {
-    let mut state = SelectorState {
-        machines,
-        cursor: 0,
-        selected: None,
-        quitting: false,
-    };
-
-    loop {
-        terminal.draw(|f| draw_selector(f, &mut state))?;
-
-        if let Event::Key(key) = event::read()? {
-            handle_selector_key(&mut state, key);
-        }
-
-        if state.quitting || state.selected.is_some() {
-            break;
+    for (i, row) in row_strs.iter().enumerate() {
+        let line = if i == 0 {
+            format!("  \x1b[1;97m▸\x1b[0m{}", row)
+        } else {
+            format!("  \x1b[90m \x1b[0m{}", row)
+        };
+        if i == machine_count - 1 {
+            print!("{}", line);
+        } else {
+            println!("{}", line);
         }
     }
 
-    Ok(state.selected)
-}
+    let _ = std::io::stdout().flush();
+    crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide)?;
+    crossterm::terminal::enable_raw_mode()?;
 
-fn draw_selector(f: &mut ratatui::Frame, state: &mut SelectorState) {
-    let area = f.area();
-    let chunks = Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
+    let mut cursor = 0usize;
 
-    // Title
-    let title = Line::from(vec![
-        Span::styled(" Select Machine ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-    ]);
-    f.render_widget(title, chunks[0]);
-
-    // Table header
-    let header = Row::new(vec![
-        Cell::from(">"),
-        Cell::from("#"),
-        Cell::from("IP"),
-        Cell::from("NAT-IP"),
-        Cell::from("Port"),
-        Cell::from("User"),
-        Cell::from("Remark"),
-    ]).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-
-    let rows: Vec<Row> = state.machines.iter().enumerate().map(|(i, m)| {
-        let indicator = if i == state.cursor { "▸" } else { " " };
-        Row::new(vec![
-            Cell::from(indicator),
-            Cell::from(format!("{}", i + 1)),
-            Cell::from(m.ip.clone()),
-            Cell::from(m.nat_ip.clone()),
-            Cell::from(format!("{}", m.port)),
-            Cell::from(m.username.clone()),
-            Cell::from(m.remark.clone()),
-        ])
-    }).collect();
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(2),
-            Constraint::Length(4),
-            Constraint::Length(15),
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(20),
-        ],
-    ).header(header);
-
-    f.render_widget(table, chunks[0]);
-
-    // Help
-    let help = Line::from(vec![
-        Span::styled("↑↓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" navigate  ", Style::default().fg(Color::Gray)),
-        Span::styled("↵", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" select  ", Style::default().fg(Color::Gray)),
-        Span::styled("q", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" quit", Style::default().fg(Color::Gray)),
-    ]);
-    f.render_widget(help, chunks[1]);
-}
-
-fn handle_selector_key(state: &mut SelectorState, key: KeyEvent) {
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => state.quitting = true,
-        KeyCode::Up | KeyCode::Char('k') => {
-            if state.cursor > 0 {
-                state.cursor -= 1;
+    let result = loop {
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    print!("\r\n");
+                    let _ = std::io::stdout().flush();
+                    break None;
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    print!("\r\n");
+                    let _ = std::io::stdout().flush();
+                    break None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if cursor > 0 {
+                        let old = cursor;
+                        cursor -= 1;
+                        redraw_row(machine_count, old, &row_strs[old], false);
+                        redraw_row(machine_count, cursor, &row_strs[cursor], true);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if cursor < machine_count - 1 {
+                        let old = cursor;
+                        cursor += 1;
+                        redraw_row(machine_count, old, &row_strs[old], false);
+                        redraw_row(machine_count, cursor, &row_strs[cursor], true);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                KeyCode::Enter => {
+                    print!("\r\n");
+                    let _ = std::io::stdout().flush();
+                    break Some(machines[cursor].clone());
+                }
+                _ => {}
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if state.cursor < state.machines.len() - 1 {
-                state.cursor += 1;
-            }
-        }
-        KeyCode::Enter => {
-            state.selected = Some(state.machines[state.cursor].clone());
-        }
-        _ => {}
+    };
+
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+    Ok(result)
+}
+
+fn redraw_row(machine_count: usize, idx: usize, text: &str, selected: bool) {
+    let indicator = if selected { "▸" } else { " " };
+    let color = if selected { "\x1b[1;97m" } else { "\x1b[90m" };
+    let reset = "\x1b[0m";
+    let up = machine_count - 1 - idx;
+    if up > 0 {
+        print!("\x1b[{}A", up);
+    }
+    print!("\r\x1b[2K  {}{}{}{}", color, indicator, reset, text);
+    if up > 0 {
+        print!("\x1b[{}B", up);
     }
 }

@@ -156,7 +156,9 @@ pub fn format_machine_row(idx: usize, m: &minishell_core::Machine, show_secrets:
             if m.password.is_empty() { empty.clone() } else { m.password.clone() },
             "".to_string(),
             if m.private_key_path.is_empty() { empty.clone() } else { m.private_key_path.clone() },
+            "".to_string(),
             if m.device.is_empty() { empty.clone() } else { m.device.clone() },
+            "".to_string(),
             if m.remark.is_empty() { empty.clone() } else { m.remark.clone() },
         ]
     } else {
@@ -186,15 +188,17 @@ pub fn default_columns() -> Vec<Column> {
 
 pub fn secrets_columns() -> Vec<Column> {
     vec![
-        Column { title: "#".into(), width: 4 },
-        Column { title: "IP".into(), width: 15 },
-        Column { title: "".into(), width: 2 },
-        Column { title: "NAT".into(), width: 12 },
-        Column { title: "User".into(), width: 10 },
-        Column { title: "Password".into(), width: 15 },
-        Column { title: "".into(), width: 2 },
-        Column { title: "Key".into(), width: 20 },
+        Column { title: "#".into(), width: 3 },
+        Column { title: "IP".into(), width: 14 },
+        Column { title: "".into(), width: 1 },
+        Column { title: "NAT".into(), width: 8 },
+        Column { title: "User".into(), width: 8 },
+        Column { title: "Password".into(), width: 10 },
+        Column { title: "".into(), width: 1 },
+        Column { title: "Key".into(), width: 16 },
+        Column { title: "".into(), width: 1 },
         Column { title: "Device".into(), width: 10 },
-        Column { title: "Remark".into(), width: 20 },
+        Column { title: "".into(), width: 1 },
+        Column { title: "Remark".into(), width: 10 },
     ]
 }

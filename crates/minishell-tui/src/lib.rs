@@ -8,7 +8,7 @@ use std::sync::Arc;
 use minishell_core::Machine;
 use minishell_store::Store;
 
-pub fn run(store: Arc<Store>) -> anyhow::Result<Option<Machine>> {
+pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
     app::run(store)
 }
 

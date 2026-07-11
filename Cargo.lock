@@ -633,6 +633,7 @@ dependencies = [
  "minishell-store",
  "minishell-tui",
  "minishell-xlsx",
+ "unicode-width",
 ]
 
 [[package]]
@@ -668,6 +669,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "minishell-core",
+ "minishell-ssh",
  "minishell-store",
  "ratatui",
  "unicode-width",

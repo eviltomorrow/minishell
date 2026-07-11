@@ -27,7 +27,7 @@ pub struct AppState {
     pub terminal_size: (u16, u16),
 }
 
-pub fn run(store: Arc<Store>) -> anyhow::Result<Option<Machine>> {
+pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
@@ -49,7 +49,7 @@ pub fn run(store: Arc<Store>) -> anyhow::Result<Option<Machine>> {
     result
 }
 
-fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: Arc<Store>) -> anyhow::Result<Option<Machine>> {
+fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: Arc<Store>) -> anyhow::Result<()> {
     let machines = store.search("")?;
     let _total = store.count_all()?;
     let columns = default_columns();
@@ -73,6 +73,18 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
     rebuild_table(&mut state);
 
     loop {
+        if let Some(machine) = state.login_target.take() {
+            terminal.clear()?;
+            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = minishell_ssh::login_to_machine(&machine);
+            let _ = crossterm::terminal::enable_raw_mode();
+            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EnterAlternateScreen);
+            terminal.clear()?;
+            reload_machines(&mut state);
+            continue;
+        }
+
         terminal.draw(|f| view(f, &mut state))?;
 
         if let Event::Key(key) = event::read()? {
@@ -84,7 +96,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
         }
     }
 
-    Ok(state.login_target)
+    Ok(())
 }
 
 fn rebuild_table(state: &mut AppState) {
@@ -354,7 +366,6 @@ fn update(state: &mut AppState, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(m) = state.machines.get(state.table.cursor()).cloned() {
                 state.login_target = Some(m);
-                state.should_quit = true;
             }
         }
         KeyCode::Char('/') => {

@@ -1,7 +1,7 @@
 pub mod card;
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
 use anyhow::{Result, Context};
@@ -18,7 +18,14 @@ pub struct ConnectConfig {
 
 pub fn connect(config: &ConnectConfig) -> Result<()> {
     let addr = format!("{}:{}", config.host, config.port);
-    let parsed_addr: std::net::SocketAddr = addr.parse().context("Invalid address")?;
+    let parsed_addr: std::net::SocketAddr = match addr.parse() {
+        Ok(addr) => addr,
+        Err(_) => addr
+            .to_socket_addrs()
+            .context("Failed to resolve hostname")?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No addresses found for hostname"))?,
+    };
     let tcp = TcpStream::connect_timeout(&parsed_addr, config.timeout)
         .with_context(|| format!("Failed to connect to {}", addr))?;
 
@@ -137,9 +144,10 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
     print!("\x1b]0;{}\x07", host);
     let _ = std::io::stdout().flush();
 
-    let width = card::terminal_width();
-    println!("{}", card::connect_card_top(&machine.ip, host, machine.port, &machine.username, auth_method, width));
-    println!("{}", card::connect_card_status_line("Connecting...", width));
+    let max_width = card::terminal_width();
+    let (card_top, card_width) = card::connect_card_top(&machine.ip, host, machine.port, &machine.username, auth_method, max_width);
+    println!("{}", card_top);
+    println!("{}\n", card::connect_card_status_line("Connecting...", card_width));
     let _ = std::io::stdout().flush();
 
     let config = ConnectConfig {
@@ -155,13 +163,13 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
     let result = connect(&config);
     let duration = start.elapsed();
 
-    print!("\x1b[A\r\x1b[K");
+    print!("\x1b[A\x1b[A\r\x1b[K");
     match &result {
-        Ok(()) => println!("{}", card::connect_success_line(duration)),
-        Err(e) => println!("{}", card::connect_fail_line(&e.to_string())),
+        Ok(()) => println!("{}", card::connect_success_line(duration, card_width)),
+        Err(e) => println!("{}", card::connect_fail_line(&e.to_string(), card_width)),
     }
 
-    println!("{}", card::disconnect_card(host, duration, result.err().map(|e| e.to_string()).as_deref(), width));
+    println!("{}", card::disconnect_card(host, duration, result.err().map(|e| e.to_string()).as_deref(), max_width));
     let _ = std::io::stdout().flush();
 
     print!("\x1b]0;minishell\x07");
