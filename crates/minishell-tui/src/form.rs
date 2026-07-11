@@ -98,6 +98,7 @@ pub struct FormState {
     pub step: usize,
     pub is_edit: bool,
     pub target_id: Option<i64>,
+    pub error: Option<String>,
 }
 
 impl FormState {
@@ -106,7 +107,7 @@ impl FormState {
             .map(|(label, max_len, width)| FormField::new(label, *max_len, *width))
             .collect();
         fields[6] = FormField::new_select("Device:", vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()]);
-        FormState { fields, step: 0, is_edit: false, target_id: None }
+        FormState { fields, step: 0, is_edit: false, target_id: None, error: None }
     }
 
     pub fn new_edit(machine: &Machine) -> Self {
@@ -142,7 +143,7 @@ impl FormState {
             })
             .collect();
 
-        FormState { fields, step: 0, is_edit: true, target_id: Some(machine.id) }
+        FormState { fields, step: 0, is_edit: true, target_id: Some(machine.id), error: None }
     }
 
     pub fn navigate_next(&mut self) {
@@ -151,6 +152,35 @@ impl FormState {
 
     pub fn navigate_prev(&mut self) {
         self.step = if self.step == 0 { self.fields.len() - 1 } else { self.step - 1 };
+    }
+
+    pub fn validate(&self) -> Option<&str> {
+        let ip = self.fields[0].value.trim();
+        let nat_ip = self.fields[1].value.trim();
+        let port = self.fields[2].value.trim();
+        let username = self.fields[3].value.trim();
+        let password = self.fields[4].value.trim();
+        let private_key = self.fields[5].value.trim();
+
+        let empty = |s: &str| s.is_empty() || s == "-";
+
+        if empty(ip) && empty(nat_ip) {
+            return Some("IP 和 NAT-IP 不能同时为空");
+        }
+        if empty(username) {
+            return Some("用户名不能为空");
+        }
+        if port.is_empty() {
+            return Some("端口不能为空");
+        }
+        if port.parse::<u16>().is_err() {
+            return Some("端口格式无效");
+        }
+        if empty(password) && empty(private_key) {
+            return Some("密码和密钥不能同时为空");
+        }
+
+        None
     }
 
     pub fn to_machine(&self) -> Machine {

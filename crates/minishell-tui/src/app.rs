@@ -207,7 +207,8 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     let gap = 2u16; // gap between dialog and status bar
     if let Some(ref form_state) = state.form {
         let status_y = main_chunks[5].y;
-        let dialog_height = 12u16;
+        let form_height = if form_state.error.is_some() { 14u16 } else { 12u16 };
+        let dialog_height = form_height;
         let dialog_width = (area.width * 50 / 100).min(area.width);
         let dialog_area = Rect {
             x: 0,
@@ -271,6 +272,13 @@ fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
                 Span::styled(format!("{}{}", field.value, cursor), style),
             ]));
         }
+    }
+
+    if let Some(ref err) = form_state.error {
+        lines.push(Line::from(Span::styled(
+            format!(" ⚠ {}", err),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
     }
 
     lines.push(Line::from(""));
@@ -412,24 +420,37 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Esc => {
             state.form = None;
         }
-        KeyCode::Up | KeyCode::Char('k') => form.navigate_prev(),
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => form.navigate_next(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            form.error = None;
+            form.navigate_prev();
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            form.error = None;
+            form.navigate_next();
+        }
         KeyCode::Enter => {
             if form.step == form.fields.len() - 1 {
-                // Last field - save
-                let machine = form.to_machine();
-                if form.is_edit {
-                    let _ = state.store.update_machine(&machine);
+                // Last field - validate before save
+                if let Some(err) = form.validate() {
+                    form.error = Some(err.to_string());
                 } else {
-                    let _ = state.store.import_machines(&[machine]);
+                    form.error = None;
+                    let machine = form.to_machine();
+                    if form.is_edit {
+                        let _ = state.store.update_machine(&machine);
+                    } else {
+                        let _ = state.store.import_machines(&[machine]);
+                    }
+                    state.form = None;
+                    reload_machines(state);
                 }
-                state.form = None;
-                reload_machines(state);
             } else {
+                form.error = None;
                 form.navigate_next();
             }
         }
         KeyCode::Left => {
+            form.error = None;
             if form.fields[form.step].select_options.is_some() {
                 let field = &mut form.fields[form.step];
                 if field.select_index > 0 {
@@ -441,6 +462,7 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
             }
         }
         KeyCode::Right => {
+            form.error = None;
             if form.fields[form.step].select_options.is_some() {
                 let field = &mut form.fields[form.step];
                 let len = field.select_options.as_ref().unwrap().len();
@@ -453,11 +475,13 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
             }
         }
         KeyCode::Char(c) => {
+            form.error = None;
             if form.fields[form.step].select_options.is_none() {
                 form.fields[form.step].insert_char(c);
             }
         }
         KeyCode::Backspace => {
+            form.error = None;
             if form.fields[form.step].select_options.is_none() {
                 form.fields[form.step].delete_char();
             }
