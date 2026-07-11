@@ -207,8 +207,7 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     let gap = 2u16; // gap between dialog and status bar
     if let Some(ref form_state) = state.form {
         let status_y = main_chunks[5].y;
-        let form_height = if form_state.error.is_some() { 14u16 } else { 12u16 };
-        let dialog_height = form_height;
+        let dialog_height = 12u16;
         let dialog_width = (area.width * 50 / 100).min(area.width);
         let dialog_area = Rect {
             x: 0,
@@ -274,22 +273,23 @@ fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
         }
     }
 
-    if let Some(ref err) = form_state.error {
-        lines.push(Line::from(Span::styled(
-            format!(" ⚠ {}", err),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )));
-    }
-
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
+    let mut help_spans = vec![
         Span::styled(" ↑↓", styles::key_style()),
         Span::styled(" next  ", styles::help_style()),
         Span::styled("↵", styles::key_style()),
         Span::styled(" save  ", styles::help_style()),
         Span::styled("Esc", styles::key_style()),
         Span::styled(" back", styles::help_style()),
-    ]));
+    ];
+    if let Some(ref err) = form_state.error {
+        help_spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        help_spans.push(Span::styled(
+            format!("【{}】", err),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.push(Line::from(help_spans));
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
