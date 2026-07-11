@@ -108,6 +108,25 @@ pub fn import_from(path: &Path) -> Result<Vec<Machine>> {
         anyhow::bail!("Excel file must have at least 2 rows (header + data)");
     }
 
+    // Validate header row matches template format
+    let header: Vec<String> = rows[0].iter().map(|c| cell_to_string(Some(c))).collect();
+    let expected: Vec<&str> = TEMPLATE_COLS.iter().map(|c| c.title).collect();
+    if header.len() < expected.len() {
+        anyhow::bail!(
+            "Invalid file format: expected {} columns, got {}. Please use 'minishell tpl' to generate a valid template.",
+            expected.len(),
+            header.len()
+        );
+    }
+    for (i, (got, want)) in header.iter().zip(expected.iter()).enumerate() {
+        if got.trim() != *want {
+            anyhow::bail!(
+                "Invalid file format: column {} expected '{}', got '{}'. Please use 'minishell tpl' to generate a valid template.",
+                i + 1, want, got
+            );
+        }
+    }
+
     let mut machines = Vec::new();
     for row in &rows[1..] {
         if row.is_empty() { continue; }
