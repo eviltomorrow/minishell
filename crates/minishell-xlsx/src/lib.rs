@@ -94,6 +94,9 @@ pub fn generate_template(path: &Path) -> Result<()> {
 }
 
 pub fn import_from(path: &Path) -> Result<Vec<Machine>> {
+    if !path.exists() {
+        anyhow::bail!("File not found: {}", path.display());
+    }
     let mut workbook = calamine::open_workbook_auto(path).context("Failed to open Excel file")?;
     let sheet_names = workbook.sheet_names();
     let sheet_name = sheet_names.first().context("No sheets found")?;

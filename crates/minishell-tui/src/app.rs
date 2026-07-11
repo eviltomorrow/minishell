@@ -24,7 +24,6 @@ pub struct AppState {
     pub delete_confirm: Option<DeleteState>,
     pub should_quit: bool,
     pub login_target: Option<Machine>,
-    pub terminal_size: (u16, u16),
 }
 
 pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
@@ -42,9 +41,6 @@ pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
     }));
 
     let result = run_inner(&mut terminal, store);
-
-    let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
 
     result
 }
@@ -66,7 +62,6 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
         delete_confirm: None,
         should_quit: false,
         login_target: None,
-        terminal_size: (0, 0),
     };
 
     // Initial table data
@@ -88,6 +83,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
         }
 
         if state.should_quit {
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
             break;
         }
     }

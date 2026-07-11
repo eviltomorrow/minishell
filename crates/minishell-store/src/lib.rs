@@ -39,58 +39,33 @@ impl Store {
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<Machine>> {
-        let sql = if query.is_empty() {
-            "SELECT id, num, ip, nat_ip, port, username, password, private_key, device, remark FROM machines ORDER BY id"
-        } else {
-            "SELECT id, num, ip, nat_ip, port, username, password, private_key, device, remark FROM machines WHERE ip LIKE ?1 OR remark LIKE ?1 ORDER BY id"
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Machine> {
+            Ok(Machine {
+                id: row.get(0)?, num: row.get(1)?, ip: row.get(2)?,
+                nat_ip: row.get(3)?, port: row.get(4)?, username: row.get(5)?,
+                password: row.get(6)?, private_key_path: row.get(7)?,
+                device: row.get(8)?, remark: row.get(9)?,
+            })
         };
 
-        let mut stmt = self.conn.prepare(sql)?;
-
-        let rows = if query.is_empty() {
+        if query.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, num, ip, nat_ip, port, username, password, private_key, device, remark FROM machines ORDER BY id"
+            )?;
+            let mut mapped = stmt.query_map([], map_row)?;
             let mut rows = Vec::new();
-            let mut mapped = stmt.query_map([], |row| {
-                Ok(Machine {
-                    id: row.get(0)?,
-                    num: row.get(1)?,
-                    ip: row.get(2)?,
-                    nat_ip: row.get(3)?,
-                    port: row.get(4)?,
-                    username: row.get(5)?,
-                    password: row.get(6)?,
-                    private_key_path: row.get(7)?,
-                    device: row.get(8)?,
-                    remark: row.get(9)?,
-                })
-            })?;
-            while let Some(row) = mapped.next() {
-                rows.push(row?);
-            }
-            rows
+            while let Some(row) = mapped.next() { rows.push(row?); }
+            Ok(rows)
         } else {
             let pattern = format!("%{}%", query);
+            let mut stmt = self.conn.prepare(
+                "SELECT id, num, ip, nat_ip, port, username, password, private_key, device, remark FROM machines WHERE ip LIKE ?1 OR remark LIKE ?1 ORDER BY id"
+            )?;
+            let mut mapped = stmt.query_map(params![pattern], map_row)?;
             let mut rows = Vec::new();
-            let mut mapped = stmt.query_map(params![pattern], |row| {
-                Ok(Machine {
-                    id: row.get(0)?,
-                    num: row.get(1)?,
-                    ip: row.get(2)?,
-                    nat_ip: row.get(3)?,
-                    port: row.get(4)?,
-                    username: row.get(5)?,
-                    password: row.get(6)?,
-                    private_key_path: row.get(7)?,
-                    device: row.get(8)?,
-                    remark: row.get(9)?,
-                })
-            })?;
-            while let Some(row) = mapped.next() {
-                rows.push(row?);
-            }
-            rows
-        };
-
-        Ok(rows)
+            while let Some(row) = mapped.next() { rows.push(row?); }
+            Ok(rows)
+        }
     }
 
     pub fn count_all(&self) -> Result<usize> {

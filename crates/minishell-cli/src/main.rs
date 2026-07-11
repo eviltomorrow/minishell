@@ -124,7 +124,20 @@ fn print_machines(machines: &[Machine]) {
     }
 }
 
-fn main() -> Result<()> {
+fn default_output_path(filename: &str) -> PathBuf {
+    let bin_dir = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    bin_dir.join(filename)
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {e}");
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -134,12 +147,7 @@ fn main() -> Result<()> {
             println!("built: {}", option_env!("BUILD_TIME").unwrap_or("unknown"));
         }
         Some(Commands::Tpl { path }) => {
-            let path = path.map(PathBuf::from).unwrap_or_else(|| {
-                let bin_dir = std::env::current_exe().ok()
-                    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-                    .unwrap_or_else(|| PathBuf::from("."));
-                bin_dir.join("machines-template.xlsx")
-            });
+            let path = path.map(PathBuf::from).unwrap_or_else(|| default_output_path("machines-template.xlsx"));
             minishell_xlsx::generate_template(&path)?;
             println!("Template generated: {}", path.display());
         }
@@ -152,12 +160,7 @@ fn main() -> Result<()> {
         Some(Commands::Export { path }) => {
             let store = open_db()?;
             let machines = store.search("")?;
-            let path = path.map(PathBuf::from).unwrap_or_else(|| {
-                let bin_dir = std::env::current_exe().ok()
-                    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-                    .unwrap_or_else(|| PathBuf::from("."));
-                bin_dir.join("machines-export.xlsx")
-            });
+            let path = path.map(PathBuf::from).unwrap_or_else(|| default_output_path("machines-export.xlsx"));
             minishell_xlsx::export_to(&path, &machines)?;
             println!("Exported {} machines to {}", machines.len(), path.display());
         }

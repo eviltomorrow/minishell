@@ -59,6 +59,11 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
     channel.request_pty(&term, None, Some((cols as u32, rows as u32, 0, 0)))?;
     channel.shell().context("Failed to start shell")?;
 
+    let _ = channel.write_all(
+        format!("export PS1=\"[{}] $PS1\"\n", config.host).as_bytes()
+    );
+    let _ = channel.flush();
+
     let _ = crossterm::terminal::enable_raw_mode();
 
     // Set session to non-blocking so channel.read() returns WouldBlock
@@ -145,9 +150,6 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
         "none"
     };
 
-    print!("\x1b]0;{}@{}\x07", machine.username, host);
-    let _ = std::io::stdout().flush();
-
     let max_width = card::terminal_width();
     let (card_top, card_width) = card::connect_card_top(&machine.ip, host, machine.port, &machine.username, auth_method, max_width);
     println!("{}", card_top);
@@ -174,9 +176,6 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
     }
 
     println!("{}", card::disconnect_card(host, duration, result.err().map(|e| e.to_string()).as_deref(), max_width));
-    let _ = std::io::stdout().flush();
-
-    print!("\x1b]0;minishell\x07");
     let _ = std::io::stdout().flush();
 
     Ok(duration)

@@ -51,14 +51,10 @@ pub fn connect_card_status_line(content: &str, width: usize) -> String {
     info_line(width, content)
 }
 
-pub fn connect_card_bottom(width: usize) -> String {
-    line(width)
-}
-
-pub fn connect_success_line(duration: std::time::Duration, width: usize) -> String {
+fn format_duration(duration: std::time::Duration) -> String {
     let total_secs = duration.as_secs();
     let ms = duration.subsec_millis();
-    let duration_str = if total_secs >= 86400 {
+    if total_secs >= 86400 {
         format!("{}d {}h {}m {}s", total_secs / 86400, (total_secs % 86400) / 3600, (total_secs % 3600) / 60, total_secs % 60)
     } else if total_secs >= 3600 {
         format!("{}h {}m {}s", total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60)
@@ -68,8 +64,11 @@ pub fn connect_success_line(duration: std::time::Duration, width: usize) -> Stri
         format!("{}.{}s", total_secs, ms / 100)
     } else {
         format!("{}ms", duration.as_millis())
-    };
-    info_line(width, &format!("{}✓ Connected{} in {}{}{}", GREEN, DIM, RESET, duration_str, RESET))
+    }
+}
+
+pub fn connect_success_line(duration: std::time::Duration, width: usize) -> String {
+    info_line(width, &format!("{}✓ Connected{} in {}{}{}", GREEN, DIM, RESET, format_duration(duration), RESET))
 }
 
 pub fn connect_fail_line(err: &str, width: usize) -> String {
@@ -77,16 +76,7 @@ pub fn connect_fail_line(err: &str, width: usize) -> String {
 }
 
 pub fn disconnect_card(host: &str, duration: std::time::Duration, ssh_err: Option<&str>, width: usize) -> String {
-    let total_secs = duration.as_secs();
-    let duration_str = if total_secs >= 86400 {
-        format!("{}d {}h {}m {}s", total_secs / 86400, (total_secs % 86400) / 3600, (total_secs % 3600) / 60, total_secs % 60)
-    } else if total_secs >= 3600 {
-        format!("{}h {}m {}s", total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60)
-    } else if total_secs >= 60 {
-        format!("{}m {}s", total_secs / 60, total_secs % 60)
-    } else {
-        format!("{}s", total_secs)
-    };
+    let duration_str = format_duration(duration);
 
     let status = match ssh_err {
         Some(err) => format!("{}{}{}", RED, err, RESET),
