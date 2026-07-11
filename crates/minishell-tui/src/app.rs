@@ -78,11 +78,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
             let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = minishell_ssh::login_to_machine(&machine);
-            let _ = crossterm::terminal::enable_raw_mode();
-            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::EnterAlternateScreen);
-            terminal.clear()?;
-            reload_machines(&mut state);
-            continue;
+            break;
         }
 
         terminal.draw(|f| view(f, &mut state))?;

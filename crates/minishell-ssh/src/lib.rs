@@ -145,7 +145,7 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
         "none"
     };
 
-    print!("\x1b]0;{}\x07", host);
+    print!("\x1b]0;{}@{}\x07", machine.username, host);
     let _ = std::io::stdout().flush();
 
     let max_width = card::terminal_width();
