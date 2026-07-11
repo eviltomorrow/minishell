@@ -15,9 +15,6 @@ struct Cli {
     /// Query for quick login
     query: Option<String>,
 
-    /// Skip TUI, use CLI mode
-    #[arg(long)]
-    no_tui: bool,
 }
 
 #[derive(Subcommand)]

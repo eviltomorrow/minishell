@@ -7,6 +7,12 @@ struct Col {
     width: usize,
 }
 
+const BOLD_CYAN: &str = "\x1b[1;36m";
+const BOLD_GREEN: &str = "\x1b[1;32m";
+const BOLD_WHITE: &str = "\x1b[1;97m";
+const DIM: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
+
 const COLS: &[Col] = &[
     Col { title: "#", width: 4 },
     Col { title: "IP", width: 15 },
@@ -33,15 +39,13 @@ fn pad_str(s: &str, width: usize) -> String {
 }
 
 fn format_row(idx: usize, m: &Machine) -> String {
-    let parts: Vec<String> = [
-        pad_str(&format!("{}", idx + 1), COLS[0].width),
-        pad_str(&m.ip, COLS[1].width),
-        pad_str(&m.nat_ip, COLS[2].width),
-        pad_str(&format!("{}", m.port), COLS[3].width),
-        pad_str(&m.username, COLS[4].width),
-        pad_str(&m.remark, COLS[5].width),
-    ].to_vec();
-    parts.join("")
+    let mut s = pad_str(&format!("{}", idx + 1), COLS[0].width);
+    s.push_str(&pad_str(&m.ip, COLS[1].width));
+    s.push_str(&pad_str(&m.nat_ip, COLS[2].width));
+    s.push_str(&pad_str(&format!("{}", m.port), COLS[3].width));
+    s.push_str(&pad_str(&m.username, COLS[4].width));
+    s.push_str(&pad_str(&m.remark, COLS[5].width));
+    s
 }
 
 pub fn select_machine(machines: Vec<Machine>) -> anyhow::Result<Option<Machine>> {
@@ -62,24 +66,22 @@ pub fn select_machine(machines: Vec<Machine>) -> anyhow::Result<Option<Machine>>
     // Print everything inline — no clearing
     println!();
     println!(
-        "  \x1b[1;36m选择要登录的机器\x1b[0m \x1b[1;32m(↑↓\x1b[0m\x1b[90m 导航\x1b[0m \
-         \x1b[1;32mEnter\x1b[0m\x1b[90m 选择\x1b[0m \x1b[1;32mEsc\x1b[0m\x1b[90m 取消)\x1b[0m"
+        "  {BOLD_CYAN}选择要登录的机器{RESET} {BOLD_GREEN}(↑↓{RESET}{DIM} 导航{RESET} \
+         {BOLD_GREEN}Enter{RESET}{DIM} 选择{RESET} {BOLD_GREEN}Esc{RESET}{DIM} 取消){RESET}"
     );
     println!();
 
-    let bold_cyan = "\x1b[1;36m";
-    let reset = "\x1b[0m";
-    let header: String = COLS.iter().map(|c| format!("{}{}{}", bold_cyan, pad_str(c.title, c.width), reset)).collect();
+    let header: String = COLS.iter().map(|c| format!("{BOLD_CYAN}{}{RESET}", pad_str(c.title, c.width))).collect();
     println!("  {}", header);
 
     let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
-    println!("\x1b[90m{}\x1b[0m", "─".repeat(term_w as usize));
+    println!("{DIM}{}{RESET}", "─".repeat(term_w as usize));
 
     for (i, row) in row_strs.iter().enumerate() {
         let line = if i == 0 {
-            format!("  \x1b[1;97m▸\x1b[0m{}", row)
+            format!("  {BOLD_WHITE}▸{RESET}{}", row)
         } else {
-            format!("  \x1b[90m \x1b[0m{}", row)
+            format!("  {DIM} {RESET}{}", row)
         };
         if i == machine_count - 1 {
             print!("{}", line);
@@ -142,13 +144,12 @@ pub fn select_machine(machines: Vec<Machine>) -> anyhow::Result<Option<Machine>>
 
 fn redraw_row(machine_count: usize, idx: usize, text: &str, selected: bool) {
     let indicator = if selected { "▸" } else { " " };
-    let color = if selected { "\x1b[1;97m" } else { "\x1b[90m" };
-    let reset = "\x1b[0m";
+    let color = if selected { BOLD_WHITE } else { DIM };
     let up = machine_count - 1 - idx;
     if up > 0 {
         print!("\x1b[{}A", up);
     }
-    print!("\r\x1b[2K  {}{}{}{}", color, indicator, reset, text);
+    print!("\r\x1b[2K  {}{}{}{}", color, indicator, RESET, text);
     if up > 0 {
         print!("\x1b[{}B", up);
     }
