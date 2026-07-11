@@ -86,6 +86,10 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
 
         let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, 100) };
         if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
             break;
         }
 
