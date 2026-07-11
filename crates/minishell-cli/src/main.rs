@@ -45,7 +45,8 @@ enum Commands {
 }
 
 fn db_path() -> PathBuf {
-    PathBuf::from("/tmp/minishell")
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".minishell")
 }
 
 fn open_db() -> Result<Store> {
