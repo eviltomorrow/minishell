@@ -68,6 +68,7 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
     }
 
     let _ = crossterm::terminal::enable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
 
     // Set session to non-blocking so channel.read() returns WouldBlock
     session.set_blocking(false);
