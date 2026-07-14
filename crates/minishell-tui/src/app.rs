@@ -10,7 +10,7 @@ use minishell_core::Machine;
 use minishell_store::Store;
 
 use super::form::{FormState, DeleteState};
-use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row};
+use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths};
 use super::styles;
 
 pub struct AppState {
@@ -97,11 +97,12 @@ fn rebuild_table(state: &mut AppState) {
         .map(|(i, m)| format_machine_row(i, m, state.show_secrets))
         .collect();
 
-    if state.show_secrets {
-        state.table.columns = secrets_columns();
+    let columns = if state.show_secrets {
+        secrets_columns()
     } else {
-        state.table.columns = default_columns();
-    }
+        default_columns()
+    };
+    state.table.columns = auto_column_widths(&columns, &rows);
     state.table.set_rows(rows);
 }
 

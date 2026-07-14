@@ -176,29 +176,47 @@ pub fn format_machine_row(idx: usize, m: &minishell_core::Machine, show_secrets:
 
 pub fn default_columns() -> Vec<Column> {
     vec![
-        Column { title: "#".into(), width: 4 },
-        Column { title: "IP".into(), width: 15 },
-        Column { title: "".into(), width: 2 },
-        Column { title: "NAT".into(), width: 12 },
-        Column { title: "User".into(), width: 10 },
-        Column { title: "Device".into(), width: 10 },
-        Column { title: "Remark".into(), width: 20 },
+        Column { title: "#".into(),       width: 4  },
+        Column { title: "IP".into(),      width: 15 },
+        Column { title: "".into(),        width: 2  },
+        Column { title: "NAT".into(),     width: 12 },
+        Column { title: "User".into(),    width: 10 },
+        Column { title: "Device".into(),  width: 10 },
+        Column { title: "Remark".into(),  width: 20 },
     ]
 }
 
 pub fn secrets_columns() -> Vec<Column> {
     vec![
-        Column { title: "#".into(), width: 3 },
-        Column { title: "IP".into(), width: 14 },
-        Column { title: "".into(), width: 1 },
-        Column { title: "NAT".into(), width: 8 },
-        Column { title: "User".into(), width: 8 },
+        Column { title: "#".into(),       width: 4  },
+        Column { title: "IP".into(),      width: 15 },
+        Column { title: "".into(),        width: 2  },
+        Column { title: "NAT".into(),     width: 12 },
+        Column { title: "User".into(),    width: 10 },
         Column { title: "Password".into(), width: 10 },
-        Column { title: "".into(), width: 1 },
-        Column { title: "Key".into(), width: 16 },
-        Column { title: "".into(), width: 1 },
-        Column { title: "Device".into(), width: 10 },
-        Column { title: "".into(), width: 1 },
-        Column { title: "Remark".into(), width: 10 },
+        Column { title: "".into(),        width: 1  },
+        Column { title: "Key".into(),     width: 16 },
+        Column { title: "".into(),        width: 1  },
+        Column { title: "Device".into(),  width: 10 },
+        Column { title: "".into(),        width: 1  },
+        Column { title: "Remark".into(),  width: 16 },
     ]
+}
+
+const COL_GAP: usize = 2;
+
+pub fn auto_column_widths(columns: &[Column], rows: &[Vec<String>]) -> Vec<Column> {
+    columns.iter().enumerate().map(|(i, col)| {
+        if col.title.is_empty() {
+            return col.clone();
+        }
+        let title_w = UnicodeWidthStr::width(col.title.as_str());
+        let max_data_w = rows.iter()
+            .filter_map(|row| row.get(i))
+            .map(|val| UnicodeWidthStr::width(val.as_str()))
+            .max()
+            .unwrap_or(0);
+        let w = title_w.max(max_data_w).max(3) + COL_GAP;
+        Column { title: col.title.clone(), width: w }
+    }).collect()
 }

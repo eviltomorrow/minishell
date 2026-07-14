@@ -84,28 +84,22 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 }
 
 fn print_machines(machines: &[Machine]) {
-    let cols = [
-        ("#", 4, false),
-        ("IP", 18, true),
-        ("NAT-IP", 15, true),
-        ("Port", 6, false),
-        ("User", 10, true),
-        ("Password", 12, true),
-        ("Key", 28, true),
-        ("Device", 8, true),
-        ("Remark", 20, true),
+    let col_meta: &[(&str, bool)] = &[
+        ("#", false),
+        ("IP", true),
+        ("NAT-IP", true),
+        ("Port", false),
+        ("User", true),
+        ("Password", true),
+        ("Key", true),
+        ("Device", true),
+        ("Remark", true),
     ];
 
-    let header: String = cols.iter()
-        .map(|(name, width, left)| pad_str(name, *width, *left))
-        .collect::<Vec<_>>()
-        .join("  ");
-    println!("{}", header);
-    println!("{}", "-".repeat(header.len()));
+    let or_dash = |s: &str| if s.is_empty() || s == "-" { "-".to_string() } else { s.to_string() };
 
-    for (i, m) in machines.iter().enumerate() {
-        let or_dash = |s: &str| if s.is_empty() || s == "-" { "-".to_string() } else { s.to_string() };
-        let values: Vec<String> = vec![
+    let rows: Vec<Vec<String>> = machines.iter().enumerate().map(|(i, m)| {
+        vec![
             format!("{}", i + 1),
             m.ip.clone(),
             or_dash(&m.nat_ip),
@@ -115,12 +109,29 @@ fn print_machines(machines: &[Machine]) {
             or_dash(&m.private_key_path),
             or_dash(&m.device),
             or_dash(&m.remark),
-        ];
-        let row: String = values.iter().zip(cols.iter())
-            .map(|(val, (_, width, left))| pad_str(val, *width, *left))
+        ]
+    }).collect();
+
+    let widths: Vec<usize> = col_meta.iter().enumerate().map(|(ci, (name, _))| {
+        let tw = UnicodeWidthStr::width(*name);
+        let dw = rows.iter().filter_map(|r| r.get(ci))
+            .map(|v| UnicodeWidthStr::width(v.as_str())).max().unwrap_or(0);
+        tw.max(dw).max(3)
+    }).collect();
+
+    let header: String = col_meta.iter().zip(&widths)
+        .map(|((name, left), w)| pad_str(name, *w, *left))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("{}", header);
+    println!("{}", "-".repeat(header.len()));
+
+    for row in &rows {
+        let line: String = row.iter().zip(col_meta.iter().zip(&widths))
+            .map(|(val, ((_, left), w))| pad_str(val, *w, *left))
             .collect::<Vec<_>>()
             .join("  ");
-        println!("{}", row);
+        println!("{}", line);
     }
 }
 
