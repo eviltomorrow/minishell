@@ -87,6 +87,15 @@ impl FormField {
         }
     }
 
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            if self.value.len() + c.len_utf8() <= self.max_length {
+                self.value.insert(self.cursor_pos, c);
+                self.cursor_pos += c.len_utf8();
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.value.clear();
         self.cursor_pos = 0;
@@ -155,6 +164,15 @@ impl FormState {
     }
 
     pub fn validate(&self) -> Option<&str> {
+        for field in self.fields.iter() {
+            if field.select_options.is_some() {
+                continue;
+            }
+            if field.value.contains(' ') {
+                return Some("字段不能包含空格");
+            }
+        }
+
         let ip = self.fields[0].value.trim();
         let nat_ip = self.fields[1].value.trim();
         let port = self.fields[2].value.trim();

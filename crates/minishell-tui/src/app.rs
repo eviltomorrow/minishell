@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{EnableBracketedPaste, DisableBracketedPaste};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -29,18 +30,20 @@ pub struct AppState {
 pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen, DisableBracketedPaste);
         default_hook(info);
     }));
 
     let result = run_inner(&mut terminal, store);
+
+    let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
 
     result
 }
@@ -78,8 +81,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
 
         terminal.draw(|f| view(f, &mut state))?;
 
-        if let Event::Key(key) = event::read()? {
-            update(&mut state, key);
+        match event::read()? {
+            Event::Key(key) => update(&mut state, key),
+            Event::Paste(data) => handle_paste(&mut state, &data),
+            _ => {}
         }
 
         if state.should_quit {
@@ -421,11 +426,11 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Esc => {
             state.form = None;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             form.error = None;
             form.navigate_prev();
         }
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+        KeyCode::Down | KeyCode::Tab => {
             form.error = None;
             form.navigate_next();
         }
@@ -477,9 +482,18 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Char(c) => {
             form.error = None;
-            if form.fields[form.step].select_options.is_none() {
-                form.fields[form.step].insert_char(c);
+            if form.fields[form.step].select_options.is_some() {
+                return;
             }
+            if c == ' ' {
+                form.error = Some("不能包含空格".to_string());
+                return;
+            }
+            if form.step == 2 && !c.is_ascii_digit() {
+                form.error = Some("端口只能输入数字".to_string());
+                return;
+            }
+            form.fields[form.step].insert_char(c);
         }
         KeyCode::Backspace => {
             form.error = None;
@@ -503,6 +517,28 @@ fn handle_delete_key(state: &mut AppState, key: KeyEvent) {
             state.delete_confirm = None;
         }
         _ => {}
+    }
+}
+
+fn handle_paste(state: &mut AppState, data: &str) {
+    if state.form.is_some() {
+        let form = state.form.as_mut().unwrap();
+        form.error = None;
+        if form.fields[form.step].select_options.is_some() {
+            return;
+        }
+        if data.contains(' ') {
+            form.error = Some("不能包含空格".to_string());
+            return;
+        }
+        if form.step == 2 && !data.chars().all(|c| c.is_ascii_digit()) {
+            form.error = Some("端口只能输入数字".to_string());
+            return;
+        }
+        form.fields[form.step].insert_str(data);
+    } else if state.search_focused {
+        state.search_input.push_str(data);
+        reload_machines(state);
     }
 }
 
