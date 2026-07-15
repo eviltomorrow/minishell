@@ -353,11 +353,11 @@ fn update(state: &mut AppState, key: KeyEvent) {
                 state.search_input.pop();
                 reload_machines(state);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 state.search_focused = false;
                 state.table.move_up();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 state.search_focused = false;
                 state.table.move_down();
             }
@@ -393,6 +393,12 @@ fn update(state: &mut AppState, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(m) = state.machines.get(state.table.cursor()).cloned() {
                 state.login_target = Some(m);
+            }
+        }
+        KeyCode::Esc => {
+            if !state.search_input.is_empty() {
+                state.search_input.clear();
+                reload_machines(state);
             }
         }
         KeyCode::Char('/') => {
@@ -442,13 +448,20 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
                 } else {
                     form.error = None;
                     let machine = form.to_machine();
-                    if form.is_edit {
-                        let _ = state.store.update_machine(&machine);
+                    let result = if form.is_edit {
+                        state.store.update_machine(&machine).map_err(|e| e)
                     } else {
-                        let _ = state.store.import_machines(&[machine]);
+                        state.store.import_machines(&[machine]).map(|_| ())
+                    };
+                    match result {
+                        Ok(_) => {
+                            state.form = None;
+                            reload_machines(state);
+                        }
+                        Err(e) => {
+                            form.error = Some(e.to_string());
+                        }
                     }
-                    state.form = None;
-                    reload_machines(state);
                 }
             } else {
                 form.error = None;
@@ -485,7 +498,7 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
             if form.fields[form.step].select_options.is_some() {
                 return;
             }
-            if c == ' ' {
+            if c == ' ' && form.step != 4 && form.step != 5 {
                 form.error = Some("不能包含空格".to_string());
                 return;
             }
@@ -509,8 +522,11 @@ fn handle_delete_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(del) = state.delete_confirm.take() {
-                let _ = state.store.delete_machine(del.target.id);
-                reload_machines(state);
+                if state.store.delete_machine(del.target.id).is_err() {
+                    state.delete_confirm = Some(del);
+                } else {
+                    reload_machines(state);
+                }
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -527,7 +543,7 @@ fn handle_paste(state: &mut AppState, data: &str) {
         if form.fields[form.step].select_options.is_some() {
             return;
         }
-        if data.contains(' ') {
+        if data.contains(' ') && form.step != 4 && form.step != 5 {
             form.error = Some("不能包含空格".to_string());
             return;
         }

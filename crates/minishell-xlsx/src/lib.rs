@@ -128,14 +128,21 @@ pub fn import_from(path: &Path) -> Result<Vec<Machine>> {
     }
 
     let mut machines = Vec::new();
-    for row in &rows[1..] {
+    for (i, row) in rows[1..].iter().enumerate() {
         if row.is_empty() { continue; }
 
         let ip = cell_to_string(row.get(0));
         if ip.is_empty() || looks_like_description(&ip) { continue; }
 
         let nat_ip = cell_to_string(row.get(1));
-        let port: i32 = cell_to_string(row.get(2)).parse().unwrap_or(22);
+        let port_str = cell_to_string(row.get(2));
+        let port: i32 = if port_str.is_empty() {
+            22
+        } else {
+            port_str.parse().map_err(|_| anyhow::anyhow!(
+                "无效端口号 '{}' (第 {} 行)", port_str, i + 2
+            ))?
+        };
         let username = cell_to_string(row.get(3));
         let password = cell_to_string(row.get(4));
         let private_key_path = cell_to_string(row.get(5));

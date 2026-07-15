@@ -139,8 +139,7 @@ impl FormState {
                     let idx = if val == "-" || val.is_empty() { 0 } else { options.iter().position(|o| o == val).unwrap_or(0) };
                     let mut f = FormField::new_select(label, options);
                     f.select_index = idx;
-                    f.value = values[i].clone();
-                    if f.value.is_empty() { f.value = "-".into(); }
+                    f.value = f.select_options.as_ref().unwrap()[idx].clone();
                     f
                 } else {
                     let mut f = FormField::new(label, *max_len, *width);
@@ -164,8 +163,11 @@ impl FormState {
     }
 
     pub fn validate(&self) -> Option<&str> {
-        for field in self.fields.iter() {
+        for (i, field) in self.fields.iter().enumerate() {
             if field.select_options.is_some() {
+                continue;
+            }
+            if i == 4 || i == 5 {
                 continue;
             }
             if field.value.contains(' ') {
