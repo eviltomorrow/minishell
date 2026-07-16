@@ -656,15 +656,30 @@ impl FileBrowserState {
 
     fn start_delete(&mut self) {
         let side = self.active_side;
-        let (entry_name, cursor) = {
+        let (entry, cursor) = {
             let p = self.active_panel();
             let cursor = p.cursor;
             match p.entries.get(cursor).cloned() {
-                Some(e) => (e.name.clone(), cursor),
+                Some(e) => (e, cursor),
                 None => return,
             }
         };
-        self.status = format!("Delete {}?", entry_name);
+        let panel = self.active_panel();
+        let full_path = panel.current_path.join(&entry.name);
+        let side_label = match side {
+            Side::Local => "Local",
+            Side::Remote => "Remote",
+        };
+        let type_label = if entry.is_dir { "Dir" } else { "File" };
+        let size_label = if entry.is_dir {
+            String::new()
+        } else {
+            format!(" ({})", sftp::format_size(entry.size))
+        };
+        self.status = format!(
+            "Delete {} {}?  [{}: {}{}]",
+            type_label, entry.name, side_label, full_path.display(), size_label
+        );
         self.confirm_delete = Some((side, cursor));
     }
 
@@ -838,6 +853,14 @@ impl FileBrowserState {
             return;
         }
 
+        if self.pending.is_some() {
+            match key.code {
+                KeyCode::Tab => self.toggle_side(),
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
@@ -1003,12 +1026,7 @@ impl FileBrowserState {
             Side::Local => &self.local,
             Side::Remote => &self.remote,
         };
-        let is_active = self.active_side == side;
-        let title = format!(
-            " {} {} ",
-            side.label(),
-            panel.current_path.display()
-        );
+        let is_active = self.active_side == side && self.pending.is_none();
 
         let border_style = if is_active {
             Style::default().fg(ACTIVE_BORDER)
@@ -1016,11 +1034,33 @@ impl FileBrowserState {
             Style::default().fg(INACTIVE_BORDER)
         };
 
+        let title_style = if is_active {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DIM)
+        };
+
+        let title = Line::from(vec![
+            Span::styled(format!(" {} ", side.label()), title_style),
+            Span::styled(
+                panel.current_path.display().to_string(),
+                if is_active {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
+        ]);
+
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
             .border_style(border_style)
-            .border_type(ratatui::widgets::BorderType::Rounded);
+            .border_type(if is_active {
+                ratatui::widgets::BorderType::Double
+            } else {
+                ratatui::widgets::BorderType::Rounded
+            });
 
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -1081,10 +1121,18 @@ impl FileBrowserState {
 
         // File entries
         let visible = (inner.height.saturating_sub(2)) as usize;
-        let selected_style = Style::default()
+        let selected_active_style = Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
             .bg(SELECTED_BG);
+        let selected_inactive_style = Style::default()
+            .fg(Color::White)
+            .bg(Color::Rgb(70, 70, 90));
+        let selected_style = if is_active {
+            selected_active_style
+        } else {
+            selected_inactive_style
+        };
         let dir_style = Style::default().fg(DIR_FG);
         let file_style = Style::default().fg(FILE_FG);
         let dim_style = Style::default().fg(DIM);
