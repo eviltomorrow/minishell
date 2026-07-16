@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::{Result, Context};
 use ssh2::Sftp;
 
+#[derive(Clone)]
 pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,

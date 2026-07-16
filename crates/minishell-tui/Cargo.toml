@@ -7,6 +7,7 @@ edition.workspace = true
 minishell-core = { workspace = true }
 minishell-store = { workspace = true }
 minishell-ssh = { workspace = true }
+ssh2 = "0.9"
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.1"
