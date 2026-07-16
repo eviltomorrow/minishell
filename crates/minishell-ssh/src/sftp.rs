@@ -87,6 +87,12 @@ pub fn download_file(
     let mut remote_file = sftp.open(Path::new(remote_path))
         .with_context(|| format!("Failed to open remote file '{}'", remote_path))?;
 
+    if let Some(parent) = local_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent dir '{}'", parent.display()))?;
+    }
+
+    let _ = std::fs::remove_file(local_path);
     let mut local_file = std::fs::File::create(local_path)
         .with_context(|| format!("Failed to create local file '{}'", local_path.display()))?;
 
@@ -221,9 +227,15 @@ pub fn upload_recursive(
         Err(e) => { return Err(e.into()); }
     };
 
-    if let Err(e) = sftp.mkdir(Path::new(remote), 0o755) {
-        errors.push(format!("mkdir {}: {}", remote, e));
-        return Ok(errors);
+    let remote_path = Path::new(remote);
+    match sftp.stat(remote_path) {
+        Ok(stat) if stat.is_dir() => {}
+        _ => {
+            if let Err(e) = sftp.mkdir(remote_path, 0o755) {
+                errors.push(format!("mkdir {}: {}", remote, e));
+                return Ok(errors);
+            }
+        }
     }
     #[cfg(unix)]
     if let Err(e) = set_perm_remote(sftp, remote, local_meta.permissions().mode() & 0o777) {
@@ -326,6 +338,12 @@ pub fn download_recursive(
                     total_files: 0,
                 });
             };
+            if let Some(parent) = local_child.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    errors.push(format!("mkdir {}: {}", parent.display(), e));
+                    continue;
+                }
+            }
             if let Err(e) = download_file(sftp, &remote_child, &local_child, &cb) {
                 errors.push(format!("{}: {}", name, e));
                 continue;

@@ -97,12 +97,10 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                 if let Event::Key(key) = event::read()? {
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
                         state.should_quit = true;
+                    } else if key.code == KeyCode::Char('q') {
+                        state.filebrowser = None;
                     } else if let Some(ref mut fb) = state.filebrowser {
-                        if fb.wants_quit(&key) {
-                            state.filebrowser = None;
-                        } else {
-                            fb.handle_key(key);
-                        }
+                        fb.handle_key(key);
                     }
                 }
             }
@@ -357,6 +355,12 @@ fn render_delete_confirm(f: &mut ratatui::Frame, area: Rect, target: &Machine) {
 }
 
 fn update(state: &mut AppState, key: KeyEvent) {
+    // Ctrl+C always quits regardless of dialog state
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        state.should_quit = true;
+        return;
+    }
+
     // Handle form/dialog first
     if state.form.is_some() {
         handle_form_key(state, key);
@@ -403,9 +407,6 @@ fn update(state: &mut AppState, key: KeyEvent) {
     // Normal mode
     match key.code {
         KeyCode::Char('q') => state.should_quit = true,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_quit = true;
-        }
         KeyCode::Up | KeyCode::Char('k') => state.table.move_up(),
         KeyCode::Down | KeyCode::Char('j') => state.table.move_down(),
         KeyCode::PageUp => {

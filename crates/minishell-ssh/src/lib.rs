@@ -230,7 +230,7 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
         private_key_path: if machine.private_key_path == "-" { String::new() } else { machine.private_key_path.clone() },
         host: host.to_string(),
         port: machine.port,
-        timeout: Duration::from_secs(10),
+        timeout: Duration::from_secs(5),
         device: machine.device.clone(),
     };
 

@@ -86,7 +86,7 @@ pub struct FileBrowserState {
     rename_input: Option<String>,
     connecting_dots: u8,
     pending_connect: Option<mpsc::Receiver<Result<ssh2::Session, String>>>,
-    needs_init: bool,
+    connect_start: std::time::Instant,
 }
 
 const HEADER_FG: Color = Color::Cyan;
@@ -103,7 +103,7 @@ const HINT: Color = Color::Gray;
 
 impl FileBrowserState {
     pub fn new(machine: Machine) -> Self {
-        let local_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let local_path = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
         let host = machine.effective_host().to_string();
         let config = ConnectConfig {
             username: machine.username.clone(),
@@ -111,7 +111,7 @@ impl FileBrowserState {
             private_key_path: if machine.private_key_path == "-" { String::new() } else { machine.private_key_path.clone() },
             host,
             port: machine.port,
-            timeout: std::time::Duration::from_secs(10),
+            timeout: std::time::Duration::from_secs(5),
             device: machine.device.clone(),
         };
         let (tx, rx) = mpsc::channel();
@@ -120,7 +120,7 @@ impl FileBrowserState {
                 .map_err(|e| format!("SSH connection failed: {}", e));
             let _ = tx.send(result);
         });
-        FileBrowserState {
+        let mut fb = FileBrowserState {
             local: PanelState::new(local_path),
             remote: PanelState::new(PathBuf::from("/")),
             active_side: Side::Local,
@@ -135,30 +135,10 @@ impl FileBrowserState {
             rename_input: None,
             connecting_dots: 0,
             pending_connect: Some(rx),
-            needs_init: true,
-        }
-    }
-
-    pub fn status(&self) -> &str {
-        &self.status
-    }
-
-    pub fn set_status(&mut self, s: &str) {
-        self.status = s.to_string();
-    }
-
-    pub fn connect(&mut self) -> Result<(), String> {
-        let config = self.build_config();
-        let session = match minishell_ssh::create_session(&config) {
-            Ok(s) => s,
-            Err(e) => {
-                self.status = format!("Error: SSH connection failed: {}", e);
-                return Err(self.status.clone());
-            }
+            connect_start: std::time::Instant::now(),
         };
-        self.session = Some(session);
-        self.status = "Connected".to_string();
-        Ok(())
+        fb.init_dirs();
+        fb
     }
 
     fn build_config(&self) -> ConnectConfig {
@@ -177,7 +157,7 @@ impl FileBrowserState {
             },
             host,
             port: self.machine.port,
-            timeout: std::time::Duration::from_secs(10),
+            timeout: std::time::Duration::from_secs(5),
             device: self.machine.device.clone(),
         }
     }
@@ -208,21 +188,18 @@ impl FileBrowserState {
     }
 
     pub fn check_pending(&mut self) {
-        // Deferred init (happens on first frame, not in 'b' handler)
-        if self.needs_init {
-            self.needs_init = false;
-            self.refresh_local();
-            if self.session.is_some() {
-                self.refresh_remote();
-            }
-        }
-
         // Check pending connection
         if let Some(rx) = &self.pending_connect {
             match rx.try_recv() {
                 Ok(Ok(session)) => {
                     self.pending_connect = None;
                     self.session = Some(session);
+                    let home = if self.machine.username == "root" {
+                        PathBuf::from("/root")
+                    } else {
+                        PathBuf::from(format!("/home/{}", self.machine.username))
+                    };
+                    self.remote.current_path = home;
                     self.refresh_remote();
                     if !self.status.starts_with("Error") {
                         let p = self.active_panel();
@@ -235,14 +212,20 @@ impl FileBrowserState {
                     self.init_dirs();
                 }
                 Err(TryRecvError::Empty) => {
-                    self.connecting_dots = (self.connecting_dots + 1) % 4;
-                    let dots = match self.connecting_dots {
-                        1 => ".",
-                        2 => "..",
-                        3 => "...",
-                        _ => "",
-                    };
-                    self.status = format!("Connecting{}", dots);
+                    if self.connect_start.elapsed() > std::time::Duration::from_secs(5) {
+                        self.pending_connect = None;
+                        self.status = "Error: Connection timed out (5s)".to_string();
+                        self.init_dirs();
+                    } else {
+                        self.connecting_dots = (self.connecting_dots + 1) % 4;
+                        let dots = match self.connecting_dots {
+                            1 => ".",
+                            2 => "..",
+                            3 => "...",
+                            _ => "",
+                        };
+                        self.status = format!("Connecting{}", dots);
+                    }
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.pending_connect = None;
@@ -855,20 +838,6 @@ impl FileBrowserState {
             return;
         }
 
-        // While connecting, only allow navigation and quit
-        if self.session.is_none() && self.status.starts_with("Connecting") {
-            match key.code {
-                KeyCode::Up => self.move_cursor(-1),
-                KeyCode::Down => self.move_cursor(1),
-                KeyCode::PageUp => self.cursor_first(),
-                KeyCode::PageDown => self.cursor_last(),
-                KeyCode::Right | KeyCode::Enter => self.enter_dir(),
-                KeyCode::Left | KeyCode::Esc => self.parent_dir(),
-                _ => {}
-            }
-            return;
-        }
-
         match key.code {
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
@@ -883,12 +852,6 @@ impl FileBrowserState {
             KeyCode::Char('r') => self.start_rename(),
             _ => {}
         }
-    }
-
-    pub fn wants_quit(&self, key: &crossterm::event::KeyEvent) -> bool {
-        matches!(key.code, crossterm::event::KeyCode::Char('q'))
-            && self.rename_input.is_none()
-            && self.confirm_delete.is_none()
     }
 
     pub fn render(&self, f: &mut Frame) {
@@ -985,17 +948,6 @@ impl FileBrowserState {
                     Span::styled(":ok  ", styles::help_style()),
                     Span::styled("Esc", styles::key_style()),
                     Span::styled(":cancel", styles::help_style()),
-                ]
-            } else if self.pending_connect.is_some() {
-                vec![
-                    Span::styled("\u{2191}\u{2193}", styles::key_style()),
-                    Span::styled(":move  ", styles::help_style()),
-                    Span::styled("\u{2192}", styles::key_style()),
-                    Span::styled(":enter  ", styles::help_style()),
-                    Span::styled("\u{2190}", styles::key_style()),
-                    Span::styled(":back  ", styles::help_style()),
-                    Span::styled("q", styles::key_style()),
-                    Span::styled(":quit", styles::help_style()),
                 ]
             } else if self.pending.is_some() {
                 vec![Span::styled("(transferring...)", styles::help_style())]
