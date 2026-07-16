@@ -35,12 +35,19 @@ impl Side {
     }
 }
 
+struct TreeEntry {
+    entry: FileEntry,
+    depth: usize,
+}
+
 struct PanelState {
     entries: Vec<FileEntry>,
     cursor: usize,
     scroll_offset: usize,
     current_path: PathBuf,
     prev_dir_name: Option<String>,
+    tree_mode: bool,
+    tree_entries: Vec<TreeEntry>,
 }
 
 impl PanelState {
@@ -51,6 +58,8 @@ impl PanelState {
             scroll_offset: 0,
             current_path: path,
             prev_dir_name: None,
+            tree_mode: false,
+            tree_entries: Vec::new(),
         }
     }
 }
