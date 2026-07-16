@@ -519,10 +519,6 @@ impl FileBrowserState {
             return;
         }
 
-        if match side { Side::Local => self.local.expanded_dirs.contains(&full_path), Side::Remote => self.remote.expanded_dirs.contains(&full_path) } {
-            return;
-        }
-
         let children = if side == Side::Remote {
             self.children_of_remote(&full_path.to_string_lossy())
         } else {
@@ -533,9 +529,18 @@ impl FileBrowserState {
                 full_path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default());
             return;
         }
+
         match side {
-            Side::Local => self.local.expanded_dirs.push(full_path),
-            Side::Remote => self.remote.expanded_dirs.push(full_path),
+            Side::Local => {
+                if self.local.expanded_dirs.contains(&full_path) { return; }
+                self.local.expanded_dirs.clear();
+                self.local.expanded_dirs.push(full_path);
+            }
+            Side::Remote => {
+                if self.remote.expanded_dirs.contains(&full_path) { return; }
+                self.remote.expanded_dirs.clear();
+                self.remote.expanded_dirs.push(full_path);
+            }
         }
         self.rebuild_panel_tree(side);
         let count = match side {
