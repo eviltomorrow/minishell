@@ -97,29 +97,12 @@ const FILE_FG: Color = Color::White;
 const SELECTED_BG: Color = Color::Blue;
 const STATUS_OK: Color = Color::Green;
 const STATUS_ERR: Color = Color::Red;
-const STATUS_BUSY: Color = Color::Yellow;
 const DIM: Color = Color::DarkGray;
 const HINT: Color = Color::Gray;
 
 impl FileBrowserState {
     pub fn new(machine: Machine) -> Self {
         let local_path = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
-        let host = machine.effective_host().to_string();
-        let config = ConnectConfig {
-            username: machine.username.clone(),
-            password: if machine.password == "-" { String::new() } else { machine.password.clone() },
-            private_key_path: if machine.private_key_path == "-" { String::new() } else { machine.private_key_path.clone() },
-            host,
-            port: machine.port,
-            timeout: std::time::Duration::from_secs(5),
-            device: machine.device.clone(),
-        };
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = minishell_ssh::create_session(&config)
-                .map_err(|e| format!("SSH connection failed: {}", e));
-            let _ = tx.send(result);
-        });
         let mut fb = FileBrowserState {
             local: PanelState::new(local_path),
             remote: PanelState::new(PathBuf::from("/")),
@@ -134,9 +117,17 @@ impl FileBrowserState {
             confirm_delete: None,
             rename_input: None,
             connecting_dots: 0,
-            pending_connect: Some(rx),
+            pending_connect: None,
             connect_start: std::time::Instant::now(),
         };
+        let config = fb.build_config();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = minishell_ssh::create_session(&config)
+                .map_err(|e| format!("SSH connection failed: {}", e));
+            let _ = tx.send(result);
+        });
+        fb.pending_connect = Some(rx);
         fb.init_dirs();
         fb
     }
@@ -187,8 +178,14 @@ impl FileBrowserState {
         }
     }
 
+    fn clear_transfer(&mut self) {
+        self.pending = None;
+        self.progress_file_name.clear();
+        self.progress_current = 0;
+        self.progress_total = 0;
+    }
+
     pub fn check_pending(&mut self) {
-        // Check pending connection
         if let Some(rx) = &self.pending_connect {
             match rx.try_recv() {
                 Ok(Ok(session)) => {
@@ -218,12 +215,7 @@ impl FileBrowserState {
                         self.init_dirs();
                     } else {
                         self.connecting_dots = (self.connecting_dots + 1) % 4;
-                        let dots = match self.connecting_dots {
-                            1 => ".",
-                            2 => "..",
-                            3 => "...",
-                            _ => "",
-                        };
+                        let dots = ".".repeat(self.connecting_dots as usize);
                         self.status = format!("Connecting{}", dots);
                     }
                 }
@@ -241,7 +233,6 @@ impl FileBrowserState {
             None => return,
         };
 
-        // Update progress from shared state
         {
             let p = transfer.progress.lock().unwrap();
             self.progress_file_name = p.file_name.clone();
@@ -249,21 +240,14 @@ impl FileBrowserState {
             self.progress_total = p.total;
         }
 
-        // Check completion
         match transfer.done_rx.try_recv() {
             Ok(ActionResult::TransferDone(side)) => {
-                self.pending = None;
-                self.progress_file_name.clear();
-                self.progress_current = 0;
-                self.progress_total = 0;
+                self.clear_transfer();
                 self.status = "Transfer complete".to_string();
                 self.refresh_panel(side);
             }
             Ok(ActionResult::Error(e)) => {
-                self.pending = None;
-                self.progress_file_name.clear();
-                self.progress_current = 0;
-                self.progress_total = 0;
+                self.clear_transfer();
                 self.status = format!("Error: {}", e);
             }
             Err(TryRecvError::Empty) => {
@@ -273,10 +257,7 @@ impl FileBrowserState {
                 }
             }
             Err(TryRecvError::Disconnected) => {
-                self.pending = None;
-                self.progress_file_name.clear();
-                self.progress_current = 0;
-                self.progress_total = 0;
+                self.clear_transfer();
                 self.status = "Transfer failed".to_string();
             }
         }
@@ -446,6 +427,46 @@ impl FileBrowserState {
         }
     }
 
+    fn start_transfer(
+        &self,
+        tx: mpsc::Sender<ActionResult>,
+        progress: Arc<Mutex<TransferProgressState>>,
+        f: impl FnOnce(ssh2::Sftp, mpsc::Sender<ActionResult>, Arc<Mutex<TransferProgressState>>) + Send + 'static,
+    ) {
+        let config = self.build_config();
+        thread::spawn(move || {
+            let session = match minishell_ssh::create_session(&config) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(ActionResult::Error(format!("Connection failed: {}", e)));
+                    return;
+                }
+            };
+            let sftp = match session.sftp() {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(ActionResult::Error(format!("SFTP init failed: {}", e)));
+                    return;
+                }
+            };
+            f(sftp, tx, progress);
+        });
+    }
+
+    fn init_transfer(&mut self, filename: String) -> (mpsc::Sender<ActionResult>, Arc<Mutex<TransferProgressState>>) {
+        let (tx, rx) = mpsc::channel();
+        let progress = Arc::new(Mutex::new(TransferProgressState {
+            file_name: filename.clone(),
+            bytes: 0,
+            total: 0,
+        }));
+        self.pending = Some(PendingTransfer { progress: progress.clone(), done_rx: rx });
+        self.progress_file_name = filename;
+        self.progress_current = 0;
+        self.progress_total = 0;
+        (tx, progress)
+    }
+
     fn upload_selected(&mut self) {
         if self.pending.is_some() {
             return;
@@ -459,91 +480,39 @@ impl FileBrowserState {
         let local_path = self.local.current_path.join(&filename);
         let remote_path = self.remote.current_path.join(&filename);
         let remote_str = remote_path.to_string_lossy().to_string();
+        let is_dir = entry.is_dir;
 
-        let config = self.build_config();
-        let (tx, rx) = mpsc::channel();
-        let progress = Arc::new(Mutex::new(TransferProgressState {
-            file_name: filename.clone(),
-            bytes: 0,
-            total: 0,
-        }));
-        let progress_clone = progress.clone();
+        let (tx, progress) = self.init_transfer(filename.clone());
 
-        self.pending = Some(PendingTransfer {
-            progress,
-            done_rx: rx,
-        });
-        self.progress_file_name = filename.clone();
-        self.progress_current = 0;
-        self.progress_total = 0;
-
-        if entry.is_dir {
+        if is_dir {
             self.status = format!("Uploading {}/...", filename);
-            thread::spawn(move || {
-                let session = match minishell_ssh::create_session(&config) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Connection failed: {}", e)));
-                        return;
-                    }
-                };
-                let sftp = match session.sftp() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("SFTP init failed: {}", e)));
-                        return;
-                    }
-                };
+            self.start_transfer(tx, progress, move |sftp, tx, progress| {
                 let cb = |p: &sftp::TransferProgress| {
-                    let mut state = progress_clone.lock().unwrap();
+                    let mut state = progress.lock().unwrap();
                     state.file_name = p.file_name.clone();
                     state.bytes = p.bytes_written;
                     state.total = p.total_bytes;
                 };
                 let errors = sftp::upload_recursive(&sftp, &local_path, &remote_str, &cb);
                 match errors {
-                    Ok(errs) if errs.is_empty() => {
-                        let _ = tx.send(ActionResult::TransferDone(Side::Remote));
-                    }
-                    Ok(errs) => {
-                        let _ = tx.send(ActionResult::Error(errs.join("; ")));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e)));
-                    }
+                    Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
+                    Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
+                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
                 }
             });
         } else {
             let total_size = entry.size;
             self.status = format!("Uploading {}...", filename);
             self.progress_total = total_size;
-            thread::spawn(move || {
-                let session = match minishell_ssh::create_session(&config) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Connection failed: {}", e)));
-                        return;
-                    }
-                };
-                let sftp = match session.sftp() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("SFTP init failed: {}", e)));
-                        return;
-                    }
-                };
+            self.start_transfer(tx, progress, move |sftp, tx, progress| {
                 let cb = |cur: u64, total: u64| {
-                    let mut state = progress_clone.lock().unwrap();
+                    let mut state = progress.lock().unwrap();
                     state.bytes = cur;
                     state.total = total;
                 };
                 match sftp::upload_file(&sftp, &local_path, &remote_str, &cb) {
-                    Ok(()) => {
-                        let _ = tx.send(ActionResult::TransferDone(Side::Remote));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e)));
-                    }
+                    Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
+                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
                 }
             });
         }
@@ -562,93 +531,40 @@ impl FileBrowserState {
         let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
         let local_path = self.local.current_path.join(&filename);
         let remote_str = remote_path.to_string_lossy().to_string();
+        let is_dir = entry.is_dir;
 
-        let config = self.build_config();
-        let (tx, rx) = mpsc::channel();
-        let progress = Arc::new(Mutex::new(TransferProgressState {
-            file_name: filename.clone(),
-            bytes: 0,
-            total: 0,
-        }));
-        let progress_clone = progress.clone();
+        let (tx, progress) = self.init_transfer(filename.clone());
 
-        self.pending = Some(PendingTransfer {
-            progress,
-            done_rx: rx,
-        });
-        self.progress_file_name = filename.clone();
-        self.progress_current = 0;
-        self.progress_total = 0;
-
-        if entry.is_dir {
+        if is_dir {
             self.status = format!("Downloading {}/...", filename);
-            let local_path_clone = local_path.clone();
-            thread::spawn(move || {
-                let session = match minishell_ssh::create_session(&config) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Connection failed: {}", e)));
-                        return;
-                    }
-                };
-                let sftp = match session.sftp() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("SFTP init failed: {}", e)));
-                        return;
-                    }
-                };
-                let _ = std::fs::create_dir_all(&local_path_clone);
+            self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                let _ = std::fs::create_dir_all(&local_path);
                 let cb = |p: &sftp::TransferProgress| {
-                    let mut state = progress_clone.lock().unwrap();
+                    let mut state = progress.lock().unwrap();
                     state.file_name = p.file_name.clone();
                     state.bytes = p.bytes_written;
                     state.total = p.total_bytes;
                 };
-                let errors = sftp::download_recursive(&sftp, &remote_str, &local_path_clone, &cb);
+                let errors = sftp::download_recursive(&sftp, &remote_str, &local_path, &cb);
                 match errors {
-                    Ok(errs) if errs.is_empty() => {
-                        let _ = tx.send(ActionResult::TransferDone(Side::Local));
-                    }
-                    Ok(errs) => {
-                        let _ = tx.send(ActionResult::Error(errs.join("; ")));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e)));
-                    }
+                    Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
+                    Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
+                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
                 }
             });
         } else {
             let total_size = entry.size;
             self.status = format!("Downloading {}...", filename);
             self.progress_total = total_size;
-            thread::spawn(move || {
-                let session = match minishell_ssh::create_session(&config) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Connection failed: {}", e)));
-                        return;
-                    }
-                };
-                let sftp = match session.sftp() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("SFTP init failed: {}", e)));
-                        return;
-                    }
-                };
+            self.start_transfer(tx, progress, move |sftp, tx, progress| {
                 let cb = |cur: u64, total: u64| {
-                    let mut state = progress_clone.lock().unwrap();
+                    let mut state = progress.lock().unwrap();
                     state.bytes = cur;
                     state.total = total;
                 };
                 match sftp::download_file(&sftp, &remote_str, &local_path, &cb) {
-                    Ok(()) => {
-                        let _ = tx.send(ActionResult::TransferDone(Side::Local));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e)));
-                    }
+                    Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
+                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
                 }
             });
         }
@@ -670,14 +586,14 @@ impl FileBrowserState {
             Side::Local => "Local",
             Side::Remote => "Remote",
         };
-        let type_label = if entry.is_dir { "Dir" } else { "File" };
+        let type_label = if entry.is_dir { "[DIR]" } else { "[FILE]" };
         let size_label = if entry.is_dir {
             String::new()
         } else {
             format!(" ({})", sftp::format_size(entry.size))
         };
         self.status = format!(
-            "Delete {} {}?  [{}: {}{}]",
+            "Delete {} {}?  {}:{}{}",
             type_label, entry.name, side_label, full_path.display(), size_label
         );
         self.confirm_delete = Some((side, cursor));
@@ -854,10 +770,6 @@ impl FileBrowserState {
         }
 
         if self.pending.is_some() {
-            match key.code {
-                KeyCode::Tab => self.toggle_side(),
-                _ => {}
-            }
             return;
         }
 
@@ -925,8 +837,9 @@ impl FileBrowserState {
 
         // Status + Help bar
         {
-            let (status_color, prefix) = if self.pending.is_some() {
-                (STATUS_BUSY, " \u{23F3} ")
+            let is_transferring = self.pending.is_some();
+            let (status_color, prefix) = if is_transferring {
+                (Color::Yellow, " \u{25B6} ")
             } else if self.status.starts_with("Error")
                 || self.status.starts_with("Delete failed")
                 || self.status.starts_with("Upload failed")
@@ -948,22 +861,61 @@ impl FileBrowserState {
                 } else {
                     self.status.clone()
                 }
+            } else if self.pending.is_some() && self.progress_total > 0 {
+                let pct = (self.progress_current * 100 / self.progress_total) as usize;
+                let bar_width = 20;
+                let filled = pct * bar_width / 100;
+                let empty = bar_width - filled;
+                let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty);
+                format!("{} {} {}%", self.progress_file_name, bar, pct)
             } else {
                 self.status.clone()
             };
 
             let mut spans: Vec<Span> = vec![
                 Span::styled(prefix, Style::default()),
-                Span::styled(&status_text, Style::default().fg(status_color)),
-                Span::styled(" │ ", styles::status_sep_style()),
             ];
+
+            if self.pending.is_some() && self.progress_total > 0 {
+                let pct = (self.progress_current * 100 / self.progress_total) as usize;
+                let bar_width = 20;
+                let filled = pct * bar_width / 100;
+                let empty = bar_width - filled;
+                spans.push(Span::styled(&self.progress_file_name, Style::default().fg(Color::Yellow)));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("\u{2588}".repeat(filled), Style::default().fg(Color::Cyan)));
+                spans.push(Span::styled("\u{2591}".repeat(empty), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(format!(" {}%", pct), Style::default().fg(Color::Yellow)));
+            } else if self.confirm_delete.is_some() {
+                if status_text.contains("[DIR]") {
+                    spans.push(Span::styled("Delete [DIR]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+                    if let Some(pos) = status_text.find("?") {
+                        let name = &status_text[12..pos];
+                        let rest = &status_text[pos..];
+                        spans.push(Span::styled(format!(" {}?", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+                        spans.push(Span::styled(rest, Style::default().fg(Color::DarkGray)));
+                    }
+                } else {
+                    spans.push(Span::styled("Delete [FILE]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+                    if let Some(pos) = status_text.find("?") {
+                        let name = &status_text[13..pos];
+                        let rest = &status_text[pos..];
+                        spans.push(Span::styled(format!(" {}?", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+                        spans.push(Span::styled(rest, Style::default().fg(Color::DarkGray)));
+                    }
+                }
+            } else {
+                spans.push(Span::styled(&status_text, Style::default().fg(status_color)));
+            }
+
+            spans.push(Span::styled(" │ ", styles::status_sep_style()));
 
             let right_spans: Vec<Span> = if self.confirm_delete.is_some() {
                 vec![
-                    Span::styled("y", styles::key_style()),
-                    Span::styled(":yes  ", styles::help_style()),
-                    Span::styled("n", styles::key_style()),
-                    Span::styled(":no", styles::help_style()),
+                    Span::styled("[Y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled("es  ", styles::help_style()),
+                    Span::styled("[N]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("o", styles::help_style()),
                 ]
             } else if self.rename_input.is_some() {
                 vec![
