@@ -51,6 +51,7 @@ struct PanelState {
     backup_entries: Vec<FileEntry>,
     backup_cursor: usize,
     backup_scroll_offset: usize,
+    expanded_path: Option<PathBuf>,
 }
 
 impl PanelState {
@@ -66,6 +67,7 @@ impl PanelState {
             backup_entries: Vec::new(),
             backup_cursor: 0,
             backup_scroll_offset: 0,
+            expanded_path: None,
         }
     }
 }
@@ -442,6 +444,7 @@ impl FileBrowserState {
         p.tree_mode = false;
         p.tree_entries.clear();
         p.backup_entries.clear();
+        p.expanded_path = None;
         self.status = format!("{} entries", p.entries.len());
     }
 
@@ -450,6 +453,7 @@ impl FileBrowserState {
             let p = self.active_panel_mut();
             p.tree_mode = false;
             p.tree_entries.clear();
+            p.expanded_path = None;
             p.entries = p.backup_entries.split_off(0);
             p.cursor = p.backup_cursor;
             p.scroll_offset = p.backup_scroll_offset;
@@ -499,10 +503,13 @@ impl FileBrowserState {
                 .into_iter().map(|mut te| { te.depth += 1; te }).collect()
         };
 
+        let expanded_full_path = path.clone();
+
         let p = self.active_panel_mut();
         p.backup_entries = p.entries.clone();
         p.backup_cursor = cursor;
         p.backup_scroll_offset = p.scroll_offset;
+        p.expanded_path = Some(expanded_full_path);
 
         let mut new_entries: Vec<TreeEntry> = Vec::with_capacity(
             entries_before.len() + 1 + children.len() + entries_after.len()
@@ -576,7 +583,33 @@ impl FileBrowserState {
             };
             if entry.is_dir {
                 let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
-                (p.current_path.join(&entry.name), dir_name)
+                let new_path = if p.tree_mode {
+                    let expanded = match p.expanded_path.as_ref() {
+                        Some(e) => e.clone(),
+                        None => p.current_path.join(&entry.name),
+                    };
+                    let depth = p.tree_entries[p.cursor].depth;
+                    if depth == 0 {
+                        expanded
+                    } else {
+                        let mut path = expanded;
+                        let mut need = depth;
+                        for i in (0..p.cursor).rev() {
+                            let prev = &p.tree_entries[i];
+                            if prev.depth == need - 1 {
+                                path = path.join(&prev.entry.name);
+                                need = prev.depth;
+                                if need == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                        path.join(&entry.name)
+                    }
+                } else {
+                    p.current_path.join(&entry.name)
+                };
+                (new_path, dir_name)
             } else {
                 let size_str = sftp::format_size(entry.size);
                 self.status = format!("{} ({})", entry.name, size_str);
@@ -588,6 +621,7 @@ impl FileBrowserState {
             p.tree_mode = false;
             p.tree_entries.clear();
             p.backup_entries.clear();
+            p.expanded_path = None;
             p.prev_dir_name = Some(dir_name);
             p.current_path = new_path;
             p.cursor = 0;
@@ -602,6 +636,7 @@ impl FileBrowserState {
             panel.tree_mode = false;
             panel.tree_entries.clear();
             panel.backup_entries.clear();
+            panel.expanded_path = None;
             panel.current_path = PathBuf::from("/");
             panel.cursor = 0;
             panel.scroll_offset = 0;
@@ -615,6 +650,7 @@ impl FileBrowserState {
             panel.tree_mode = false;
             panel.tree_entries.clear();
             panel.backup_entries.clear();
+            panel.expanded_path = None;
         }
         if self.active_side == Side::Remote {
             let home = if self.machine.username == "root" {
@@ -652,6 +688,7 @@ impl FileBrowserState {
                 p.tree_mode = false;
                 p.tree_entries.clear();
                 p.backup_entries.clear();
+                p.expanded_path = None;
                 p.current_path = path;
                 p.cursor = 0;
                 p.scroll_offset = 0;
