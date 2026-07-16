@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use minishell_core::Machine;
 use minishell_ssh::sftp::{self, FileEntry, format_modified};
@@ -10,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
+use crate::styles;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Side {
@@ -24,6 +26,13 @@ impl Side {
             Side::Remote => Side::Local,
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Side::Local => "LOCAL",
+            Side::Remote => "REMOTE",
+        }
+    }
 }
 
 struct PanelState {
@@ -31,6 +40,7 @@ struct PanelState {
     cursor: usize,
     scroll_offset: usize,
     current_path: PathBuf,
+    prev_dir_name: Option<String>,
 }
 
 impl PanelState {
@@ -40,13 +50,19 @@ impl PanelState {
             cursor: 0,
             scroll_offset: 0,
             current_path: path,
+            prev_dir_name: None,
         }
     }
 }
 
 enum ActionResult {
-    TransferDone,
+    TransferDone(Side),
     Error(String),
+}
+
+struct PendingTransfer {
+    progress: Arc<Mutex<(u64, u64)>>,
+    done_rx: Receiver<ActionResult>,
 }
 
 pub struct FileBrowserState {
@@ -56,10 +72,24 @@ pub struct FileBrowserState {
     active_side: Side,
     session: Option<ssh2::Session>,
     status: String,
-    pending: Option<Receiver<ActionResult>>,
+    pending: Option<PendingTransfer>,
+    progress_current: u64,
+    progress_total: u64,
     confirm_delete: Option<(Side, usize)>,
     rename_input: Option<String>,
 }
+
+const HEADER_FG: Color = Color::Cyan;
+const ACTIVE_BORDER: Color = Color::Cyan;
+const INACTIVE_BORDER: Color = Color::DarkGray;
+const DIR_FG: Color = Color::Yellow;
+const FILE_FG: Color = Color::White;
+const SELECTED_BG: Color = Color::Blue;
+const STATUS_OK: Color = Color::Green;
+const STATUS_ERR: Color = Color::Red;
+const STATUS_BUSY: Color = Color::Yellow;
+const DIM: Color = Color::DarkGray;
+const HINT: Color = Color::Gray;
 
 impl FileBrowserState {
     pub fn new(machine: Machine) -> Self {
@@ -67,11 +97,13 @@ impl FileBrowserState {
         FileBrowserState {
             local: PanelState::new(local_path),
             remote: PanelState::new(PathBuf::from("/")),
-            active_side: Side::Remote,
+            active_side: Side::Local,
             machine,
             session: None,
             status: "Connecting...".to_string(),
             pending: None,
+            progress_current: 0,
+            progress_total: 0,
             confirm_delete: None,
             rename_input: None,
         }
@@ -126,26 +158,49 @@ impl FileBrowserState {
         if self.session.is_some() {
             self.refresh_remote();
         }
+        let p = self.active_panel();
+        self.status = format!("{} entries", p.entries.len());
     }
 
     pub fn check_pending(&mut self) {
-        if let Some(ref rx) = self.pending {
-            match rx.try_recv() {
-                Ok(ActionResult::TransferDone) => {
-                    self.pending = None;
-                    self.status = "Transfer complete".to_string();
-                    self.refresh_panel(Side::Remote);
-                    self.refresh_panel(Side::Local);
+        let transfer = match self.pending.as_ref() {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Update progress from shared state
+        {
+            let p = transfer.progress.lock().unwrap();
+            self.progress_current = p.0;
+            self.progress_total = p.1;
+        }
+
+        // Check completion
+        match transfer.done_rx.try_recv() {
+            Ok(ActionResult::TransferDone(side)) => {
+                self.pending = None;
+                self.progress_current = 0;
+                self.progress_total = 0;
+                self.status = "Transfer complete".to_string();
+                self.refresh_panel(side);
+            }
+            Ok(ActionResult::Error(e)) => {
+                self.pending = None;
+                self.progress_current = 0;
+                self.progress_total = 0;
+                self.status = format!("Error: {}", e);
+            }
+            Err(TryRecvError::Empty) => {
+                if self.progress_total > 0 {
+                    let pct = self.progress_current * 100 / self.progress_total;
+                    self.status = format!("Transferring... {}%", pct);
                 }
-                Ok(ActionResult::Error(e)) => {
-                    self.pending = None;
-                    self.status = format!("Error: {}", e);
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    self.pending = None;
-                    self.status = "Transfer failed".to_string();
-                }
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                self.progress_current = 0;
+                self.progress_total = 0;
+                self.status = "Transfer failed".to_string();
             }
         }
     }
@@ -176,7 +231,9 @@ impl FileBrowserState {
         }
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
         self.local.entries = entries;
-        self.local.cursor = self.local.cursor.min(self.local.entries.len().saturating_sub(1));
+        self.local.cursor = self.local
+            .cursor
+            .min(self.local.entries.len().saturating_sub(1));
         self.local.scroll_offset = 0;
     }
 
@@ -220,6 +277,8 @@ impl FileBrowserState {
 
     pub fn toggle_side(&mut self) {
         self.active_side = self.active_side.other();
+        let p = self.active_panel();
+        self.status = format!("{} entries", p.entries.len());
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -236,7 +295,7 @@ impl FileBrowserState {
     }
 
     fn enter_dir(&mut self) {
-        let new_path = {
+        let (new_path, dir_name) = {
             let p = self.active_panel();
             if p.entries.is_empty() {
                 return;
@@ -245,10 +304,12 @@ impl FileBrowserState {
             if !entry.is_dir {
                 return;
             }
-            p.current_path.join(&entry.name)
+            let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+            (p.current_path.join(&entry.name), dir_name)
         };
         {
             let p = self.active_panel_mut();
+            p.prev_dir_name = Some(dir_name);
             p.current_path = new_path;
             p.cursor = 0;
             p.scroll_offset = 0;
@@ -257,12 +318,13 @@ impl FileBrowserState {
     }
 
     fn parent_dir(&mut self) {
-        let parent = {
+        let (parent, prev_name) = {
             let p = self.active_panel();
             if p.current_path.parent().map_or(true, |p| p.as_os_str().is_empty()) {
                 return;
             }
-            p.current_path.parent().map(|p| p.to_path_buf())
+            let parent = p.current_path.parent().map(|p| p.to_path_buf());
+            (parent, p.prev_dir_name.clone())
         };
         if let Some(path) = parent {
             {
@@ -272,13 +334,16 @@ impl FileBrowserState {
                 p.scroll_offset = 0;
             }
             self.refresh_panel(self.active_side);
+            if let Some(ref name) = prev_name {
+                let p = self.active_panel_mut();
+                if let Some(pos) = p.entries.iter().position(|e| e.name == *name || e.name.ends_with(&format!("/{}", name))) {
+                    p.cursor = pos;
+                }
+            }
         }
     }
 
     fn upload_selected(&mut self) {
-        if self.active_side != Side::Local {
-            return;
-        }
         if self.pending.is_some() {
             return;
         }
@@ -291,14 +356,24 @@ impl FileBrowserState {
             }
         };
 
-        let local_path = self.local.current_path.join(&entry.name);
-        let remote_path = self.remote.current_path.join(&entry.name);
+        let total_size = entry.size;
+        let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+        let local_path = self.local.current_path.join(filename);
+        let remote_path = self.remote.current_path.join(filename);
         let remote_str = remote_path.to_string_lossy().to_string();
 
-        self.status = format!("Uploading {}...", entry.name);
+        self.status = format!("Uploading {}...", filename);
         let config = self.build_config();
         let (tx, rx) = mpsc::channel();
-        self.pending = Some(rx);
+        let progress = Arc::new(Mutex::new((0u64, total_size)));
+        let progress_clone = progress.clone();
+
+        self.pending = Some(PendingTransfer {
+            progress,
+            done_rx: rx,
+        });
+        self.progress_current = 0;
+        self.progress_total = total_size;
 
         thread::spawn(move || {
             let session = match minishell_ssh::create_session(&config) {
@@ -315,17 +390,22 @@ impl FileBrowserState {
                     return;
                 }
             };
-            match sftp::upload_file(&sftp, &local_path, &remote_str) {
-                Ok(()) => { let _ = tx.send(ActionResult::TransferDone); }
-                Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
+            let cb = |cur, total| {
+                let mut p = progress_clone.lock().unwrap();
+                *p = (cur, total);
+            };
+            match sftp::upload_file(&sftp, &local_path, &remote_str, &cb) {
+                Ok(()) => {
+                    let _ = tx.send(ActionResult::TransferDone(Side::Remote));
+                }
+                Err(e) => {
+                    let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e)));
+                }
             }
         });
     }
 
     fn download_selected(&mut self) {
-        if self.active_side != Side::Remote {
-            return;
-        }
         if self.pending.is_some() {
             return;
         }
@@ -338,14 +418,24 @@ impl FileBrowserState {
             }
         };
 
+        let total_size = entry.size;
         let remote_path = self.remote.current_path.join(&entry.name);
-        let local_path = self.local.current_path.join(&entry.name);
+        let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+        let local_path = self.local.current_path.join(filename);
         let remote_str = remote_path.to_string_lossy().to_string();
 
         self.status = format!("Downloading {}...", entry.name);
         let config = self.build_config();
         let (tx, rx) = mpsc::channel();
-        self.pending = Some(rx);
+        let progress = Arc::new(Mutex::new((0u64, total_size)));
+        let progress_clone = progress.clone();
+
+        self.pending = Some(PendingTransfer {
+            progress,
+            done_rx: rx,
+        });
+        self.progress_current = 0;
+        self.progress_total = total_size;
 
         thread::spawn(move || {
             let session = match minishell_ssh::create_session(&config) {
@@ -362,9 +452,17 @@ impl FileBrowserState {
                     return;
                 }
             };
-            match sftp::download_file(&sftp, &remote_str, &local_path) {
-                Ok(()) => { let _ = tx.send(ActionResult::TransferDone); }
-                Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
+            let cb = |cur, total| {
+                let mut p = progress_clone.lock().unwrap();
+                *p = (cur, total);
+            };
+            match sftp::download_file(&sftp, &remote_str, &local_path, &cb) {
+                Ok(()) => {
+                    let _ = tx.send(ActionResult::TransferDone(Side::Local));
+                }
+                Err(e) => {
+                    let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e)));
+                }
             }
         });
     }
@@ -424,7 +522,8 @@ impl FileBrowserState {
                     return;
                 }
             };
-            sftp::remove_file(&sftp, &path_str).or_else(|_| sftp::remove_dir(&sftp, &path_str))
+            sftp::remove_file(&sftp, &path_str)
+                .or_else(|_| sftp::remove_dir(&sftp, &path_str))
                 .map_err(|e| e.to_string())
         };
 
@@ -476,8 +575,7 @@ impl FileBrowserState {
         };
 
         let result = match side {
-            Side::Local => std::fs::rename(&old_path, &new_path)
-                .map_err(|e| e.to_string()),
+            Side::Local => std::fs::rename(&old_path, &new_path).map_err(|e| e.to_string()),
             Side::Remote => {
                 let session = match self.session.as_ref() {
                     Some(s) => s,
@@ -493,12 +591,8 @@ impl FileBrowserState {
                         return;
                     }
                 };
-                sftp::rename_item(
-                    &sftp,
-                    &old_path.to_string_lossy(),
-                    &new_path.to_string_lossy(),
-                )
-                .map_err(|e| e.to_string())
+                sftp::rename_item(&sftp, &old_path.to_string_lossy(), &new_path.to_string_lossy())
+                    .map_err(|e| e.to_string())
             }
         };
 
@@ -553,8 +647,8 @@ impl FileBrowserState {
         match key.code {
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
-            KeyCode::Enter => self.enter_dir(),
-            KeyCode::Backspace | KeyCode::Char('h') => self.parent_dir(),
+            KeyCode::Right | KeyCode::Enter => self.enter_dir(),
+            KeyCode::Left | KeyCode::Esc => self.parent_dir(),
             KeyCode::Tab => self.toggle_side(),
             KeyCode::Char('u') => self.upload_selected(),
             KeyCode::Char('d') => self.download_selected(),
@@ -575,26 +669,36 @@ impl FileBrowserState {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(2),                       // header (text + separator)
+                Constraint::Min(2),                          // panels
+                Constraint::Length(1),                       // status + help
+            ])
             .split(area);
 
         // Header
+        let header_lines = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(chunks[0]);
+
         let host = self.machine.effective_host();
-        let header = format!(
-            " {}@{}:{}   {}",
-            self.machine.username,
-            host,
-            self.machine.port,
-            self.remote.current_path.display()
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("文件浏览器", styles::header_style()),
+                Span::styled(format!("  {}@{}:{}", self.machine.username, host, self.machine.port), styles::help_style()),
+                Span::styled(format!("  {}", self.active_panel().current_path.display()), Style::default().fg(Color::DarkGray)),
+            ])),
+            header_lines[0],
         );
+
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                &header,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                "─".repeat(area.width as usize),
+                styles::separator_style(),
             ))),
-            chunks[0],
+            header_lines[1],
         );
 
         // Split panels
@@ -606,48 +710,85 @@ impl FileBrowserState {
         self.render_panel(f, panels[0], Side::Local);
         self.render_panel(f, panels[1], Side::Remote);
 
-        // Status bar
-        let (status_color, prefix) = if self.pending.is_some() {
-            (Color::Yellow, " ⏳ ")
-        } else if self.status.starts_with("Error")
-            || self.status.starts_with("Delete failed")
-            || self.status.starts_with("Upload failed")
-            || self.status.starts_with("Download failed")
+        // Status + Help bar
         {
-            (Color::Red, " ✗ ")
-        } else if self.status.starts_with("Transfer complete")
-            || self.status.starts_with("Deleted")
-            || self.status.starts_with("Renamed")
-        {
-            (Color::Green, " ✓ ")
-        } else {
-            (Color::White, "   ")
-        };
+            let (status_color, prefix) = if self.pending.is_some() {
+                (STATUS_BUSY, " \u{23F3} ")
+            } else if self.status.starts_with("Error")
+                || self.status.starts_with("Delete failed")
+                || self.status.starts_with("Upload failed")
+                || self.status.starts_with("Download failed")
+            {
+                (STATUS_ERR, " \u{2717} ")
+            } else if self.status.starts_with("Transfer complete")
+                || self.status.starts_with("Deleted")
+                || self.status.starts_with("Renamed")
+            {
+                (STATUS_OK, " \u{2713} ")
+            } else {
+                (HINT, "   ")
+            };
 
-        let mut spans: Vec<Span> = vec![
-            Span::styled(prefix, Style::default()),
-            Span::styled(&self.status, Style::default().fg(status_color)),
-        ];
+            let mut spans: Vec<Span> = vec![
+                Span::styled(prefix, Style::default()),
+                Span::styled(&self.status, Style::default().fg(status_color)),
+                Span::styled(" │ ", styles::status_sep_style()),
+            ];
 
-        let help = if self.confirm_delete.is_some() {
-            "  y:确认  n:取消".to_string()
-        } else if self.rename_input.is_some() {
-            format!(
-                "  Enter:确认  Esc:取消  {}▌",
-                self.rename_input.as_ref().unwrap()
-            )
-        } else {
-            "  Tab:切栏  ↑↓:移动  Enter:进入  u:上传  d:下载  x:删除  r:重命名  q:退出  Backspace:上级".to_string()
-        };
-        let w = area.width as usize;
-        let spans_width: usize = spans.iter().map(|s| s.width()).sum();
-        if spans_width + help.len() + 4 < w {
-            let padding = w - spans_width - help.len();
-            spans.push(Span::raw(" ".repeat(padding)));
+            let right_spans: Vec<Span> = if self.confirm_delete.is_some() {
+                vec![
+                    Span::styled("y", styles::key_style()),
+                    Span::styled(":yes  ", styles::help_style()),
+                    Span::styled("n", styles::key_style()),
+                    Span::styled(":no", styles::help_style()),
+                ]
+            } else if self.rename_input.is_some() {
+                vec![
+                    Span::styled("Enter", styles::key_style()),
+                    Span::styled(":ok  ", styles::help_style()),
+                    Span::styled("Esc", styles::key_style()),
+                    Span::styled(":cancel", styles::help_style()),
+                ]
+            } else if self.pending.is_some() {
+                vec![Span::styled("(transferring...)", styles::help_style())]
+            } else {
+                vec![
+                    Span::styled("Tab", styles::key_style()),
+                    Span::styled(":panel  ", styles::help_style()),
+                    Span::styled("\u{2191}\u{2193}", styles::key_style()),
+                    Span::styled(":move  ", styles::help_style()),
+                    Span::styled("\u{2192}", styles::key_style()),
+                    Span::styled(":enter  ", styles::help_style()),
+                    Span::styled("\u{2190}", styles::key_style()),
+                    Span::styled(":back  ", styles::help_style()),
+                    Span::styled("u", styles::key_style()),
+                    Span::styled(":upload  ", styles::help_style()),
+                    Span::styled("d", styles::key_style()),
+                    Span::styled(":download  ", styles::help_style()),
+                    Span::styled("x", styles::key_style()),
+                    Span::styled(":del  ", styles::help_style()),
+                    Span::styled("r", styles::key_style()),
+                    Span::styled(":rename  ", styles::help_style()),
+                    Span::styled("q", styles::key_style()),
+                    Span::styled(":quit", styles::help_style()),
+                ]
+            };
+
+            let w = area.width as usize;
+            let right_edge_gap = 2usize;
+            let left_width: usize = spans.iter().map(|s| s.width()).sum();
+            let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
+            if left_width + right_width + right_edge_gap < w {
+                let padding = w - left_width - right_width - right_edge_gap;
+                spans.push(Span::raw(" ".repeat(padding)));
+            }
+            spans.extend(right_spans);
+
+            f.render_widget(
+                Line::from(spans).style(Style::default().bg(Color::Reset)),
+                chunks[2],
+            );
         }
-        spans.push(Span::styled(&help, Style::default().fg(Color::Gray)));
-
-        f.render_widget(Line::from(spans), chunks[2]);
     }
 
     fn render_panel(&self, f: &mut Frame, area: Rect, side: Side) {
@@ -657,15 +798,15 @@ impl FileBrowserState {
         };
         let is_active = self.active_side == side;
         let title = format!(
-            " {} {}",
-            if side == Side::Local { "LOCAL" } else { "REMOTE" },
+            " {} {} ",
+            side.label(),
             panel.current_path.display()
         );
 
         let border_style = if is_active {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(ACTIVE_BORDER)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(INACTIVE_BORDER)
         };
 
         let block = Block::default()
@@ -677,13 +818,29 @@ impl FileBrowserState {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Header row
+        // Column widths
+        let size_width: usize = 8;
+        let modified_width: usize = 16;
+        let gap: usize = 2;
+        let overhead: usize = 1 + size_width + gap + modified_width;
+        let name_area = (inner.width as usize).saturating_sub(overhead).max(6);
+
+        // Column header
         let header = Line::from(vec![
-            Span::styled("  Name", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" ".repeat(inner.width.saturating_sub(22).max(1) as usize)),
-            Span::styled("Size", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                pad_right("Name", name_area),
+                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                pad_left("Size", size_width),
+                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
-            Span::styled("Modified", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                pad_left("Modified", modified_width),
+                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
+            ),
         ]);
         f.render_widget(
             header,
@@ -695,15 +852,31 @@ impl FileBrowserState {
             },
         );
 
-        // Entries
-        let visible = (inner.height.saturating_sub(1)) as usize;
+        // Separator under header
+        f.render_widget(
+            Line::from(Span::styled(
+                "─".repeat(inner.width as usize),
+                Style::default().fg(DIM),
+            )),
+            Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: 1,
+            },
+        );
+
+        // File entries
+        let visible = (inner.height.saturating_sub(2)) as usize;
         let selected_style = Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
-            .bg(Color::Blue);
-        let dir_style = Style::default().fg(Color::Cyan);
-        let file_style = Style::default().fg(Color::White);
-        let dim_style = Style::default().fg(Color::DarkGray);
+            .bg(SELECTED_BG);
+        let dir_style = Style::default().fg(DIR_FG);
+        let file_style = Style::default().fg(FILE_FG);
+        let dim_style = Style::default().fg(DIM);
+
+        let marker_active = if is_active { "\u{25B8}" } else { " " };
 
         for i in 0..visible {
             let idx = panel.scroll_offset + i;
@@ -711,7 +884,8 @@ impl FileBrowserState {
                 break;
             }
             let entry = &panel.entries[idx];
-            let style = if idx == panel.cursor {
+            let is_selected = idx == panel.cursor;
+            let style = if is_selected {
                 selected_style
             } else if entry.is_dir {
                 dir_style
@@ -719,44 +893,40 @@ impl FileBrowserState {
                 file_style
             };
 
-            let marker = if idx == panel.cursor && is_active {
-                "▸"
+            let marker = if is_selected {
+                marker_active
             } else {
                 " "
             };
-            let icon = if entry.is_dir { "📁" } else { " " };
-            let name = format!("{}{} {}", marker, icon, entry.name);
+            let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+            let short_name = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+            let name = format!("{}{} {}", marker, icon, short_name);
+
+            let display_name = truncate_to_width(&name, name_area);
+            let display_name_padded = pad_right(&display_name, name_area);
 
             let size_str = if entry.is_dir {
-                String::new()
+                pad_left("", size_width)
             } else {
-                format_size(entry.size)
+                pad_left(&format_size(entry.size), size_width)
             };
 
-            let y = inner.y + 1 + i as u16;
-            let name_width = (inner.width as usize).saturating_sub(22).max(1);
-            let display_name = truncate_to_width(&name, name_width);
+            let modified_str = pad_left(&entry.modified, modified_width);
+
+            let y = inner.y + 2 + i as u16;
 
             f.render_widget(
                 Line::from(vec![
-                    Span::styled(display_name, style),
+                    Span::styled(display_name_padded, style),
                     Span::raw(" "),
                     Span::styled(
-                        pad_left(&size_str, 10),
-                        if idx == panel.cursor {
-                            selected_style
-                        } else {
-                            dim_style
-                        },
+                        &size_str,
+                        if is_selected { selected_style } else { dim_style },
                     ),
                     Span::raw("  "),
                     Span::styled(
-                        &entry.modified,
-                        if idx == panel.cursor {
-                            selected_style
-                        } else {
-                            dim_style
-                        },
+                        &modified_str,
+                        if is_selected { selected_style } else { dim_style },
                     ),
                 ]),
                 Rect {
@@ -795,6 +965,15 @@ fn pad_left(s: &str, width: usize) -> String {
         truncate_to_width(s, width)
     } else {
         format!("{}{}", " ".repeat(width - w), s)
+    }
+}
+
+fn pad_right(s: &str, width: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        truncate_to_width(s, width)
+    } else {
+        format!("{}{}", s, " ".repeat(width - w))
     }
 }
 

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::event::{EnableBracketedPaste, DisableBracketedPaste};
 use ratatui::backend::CrosstermBackend;
@@ -91,9 +92,11 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                     fb.render(f);
                 }
             })?;
-            match event::read()? {
-                Event::Key(key) => {
-                    if let Some(ref mut fb) = state.filebrowser {
+            if crossterm::event::poll(Duration::from_millis(200))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+                        state.should_quit = true;
+                    } else if let Some(ref mut fb) = state.filebrowser {
                         if fb.wants_quit(&key) {
                             state.filebrowser = None;
                         } else {
@@ -101,7 +104,6 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                         }
                     }
                 }
-                _ => {}
             }
         } else {
             terminal.draw(|f| view(f, &mut state))?;

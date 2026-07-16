@@ -33,24 +33,43 @@ pub fn list_dir(sftp: &Sftp, path: &str) -> Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
-pub fn upload_file(sftp: &Sftp, local_path: &Path, remote_path: &str) -> Result<()> {
+pub fn upload_file(
+    sftp: &Sftp,
+    local_path: &Path,
+    remote_path: &str,
+    progress: &dyn Fn(u64, u64),
+) -> Result<()> {
     let mut local_file = std::fs::File::open(local_path)
         .with_context(|| format!("Failed to open local file '{}'", local_path.display()))?;
+    let total = local_file.metadata().map(|m| m.len()).unwrap_or(0);
 
     let mut remote_file = sftp.create(Path::new(remote_path))
         .with_context(|| format!("Failed to create remote file '{}'", remote_path))?;
 
     let mut buf = [0u8; 65536];
+    let mut written = 0u64;
     loop {
         let n = local_file.read(&mut buf)?;
         if n == 0 { break; }
         remote_file.write_all(&buf[..n])?;
+        written += n as u64;
+        progress(written, total);
     }
     remote_file.close()?;
+    progress(total, total);
     Ok(())
 }
 
-pub fn download_file(sftp: &Sftp, remote_path: &str, local_path: &Path) -> Result<()> {
+pub fn download_file(
+    sftp: &Sftp,
+    remote_path: &str,
+    local_path: &Path,
+    progress: &dyn Fn(u64, u64),
+) -> Result<()> {
+    let stat = sftp.stat(Path::new(remote_path))
+        .with_context(|| format!("Failed to stat remote file '{}'", remote_path))?;
+    let total = stat.size.unwrap_or(0);
+
     let mut remote_file = sftp.open(Path::new(remote_path))
         .with_context(|| format!("Failed to open remote file '{}'", remote_path))?;
 
@@ -58,11 +77,15 @@ pub fn download_file(sftp: &Sftp, remote_path: &str, local_path: &Path) -> Resul
         .with_context(|| format!("Failed to create local file '{}'", local_path.display()))?;
 
     let mut buf = [0u8; 65536];
+    let mut written = 0u64;
     loop {
         let n = remote_file.read(&mut buf)?;
         if n == 0 { break; }
         local_file.write_all(&buf[..n])?;
+        written += n as u64;
+        progress(written, total);
     }
+    progress(total, total);
     Ok(())
 }
 
