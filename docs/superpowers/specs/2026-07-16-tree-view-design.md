@@ -46,8 +46,8 @@ struct PanelState {
 
 | Transition | Action |
 |---|---|
-| `tree_mode: false` → `true` | Back up current entries (used only for restoration on `t` again). Recursively list contents of current directory up to 2 levels, build `tree_entries`. Set cursor to 0. |
-| `tree_mode: true` → `false` | Clear `tree_entries`, re-run `refresh_panel()` (returns to normal flat list). Cursor resets via existing panel refresh logic. |
+| `tree_mode: false` → `true` | Recursively list contents of current directory up to 2 levels, build `tree_entries`. Set cursor to 0. |
+| `tree_mode: true` → `false` | Clear `tree_entries`, re-run `refresh_panel()` (re-reads from filesystem, returns to flat list). Cursor resets via existing refresh logic. |
 
 ### Navigation
 
@@ -70,8 +70,7 @@ Rationale for exiting tree mode on Enter/Left: the user enters a new directory (
 ### Disabled Operations
 
 In tree mode, pressing `u`, `d`, `x`, or `r`:
-- Operation is silently ignored (no crash, no state change)
-- Status bar may briefly show a hint like "Not available in tree mode" (optional, lower priority)
+- Operation is silently ignored — no crash, no state change, no status bar update
 
 ## Rendering
 
