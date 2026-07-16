@@ -538,17 +538,34 @@ impl FileBrowserState {
             return;
         }
 
+        if match side { Side::Local => self.local.expanded_dirs.contains(&full_path), Side::Remote => self.remote.expanded_dirs.contains(&full_path) } {
+            return;
+        }
+
+        let depth = {
+            let p = self.active_panel();
+            p.tree_entries[p.cursor].depth
+        };
+
+        let mut new_expanded = Vec::new();
+        {
+            let p = self.active_panel();
+            let mut need = depth;
+            for i in (0..p.cursor).rev() {
+                let prev = &p.tree_entries[i];
+                if prev.depth == need - 1 {
+                    new_expanded.push(Self::tree_entry_full_path(p, i));
+                    need = prev.depth;
+                    if need == 0 { break; }
+                }
+            }
+        }
+        new_expanded.reverse();
+        new_expanded.push(full_path);
+
         match side {
-            Side::Local => {
-                if self.local.expanded_dirs.contains(&full_path) { return; }
-                self.local.expanded_dirs.clear();
-                self.local.expanded_dirs.push(full_path);
-            }
-            Side::Remote => {
-                if self.remote.expanded_dirs.contains(&full_path) { return; }
-                self.remote.expanded_dirs.clear();
-                self.remote.expanded_dirs.push(full_path);
-            }
+            Side::Local => self.local.expanded_dirs = new_expanded,
+            Side::Remote => self.remote.expanded_dirs = new_expanded,
         }
         self.rebuild_panel_tree(side);
         let count = match side {
