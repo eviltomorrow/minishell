@@ -596,10 +596,10 @@ impl FileBrowserState {
                         let mut need = depth;
                         for i in (0..p.cursor).rev() {
                             let prev = &p.tree_entries[i];
-                            if prev.depth == need - 1 {
+                            if prev.depth >= 1 && prev.depth == need - 1 {
                                 path = path.join(&prev.entry.name);
                                 need = prev.depth;
-                                if need == 0 {
+                                if need == 1 {
                                     break;
                                 }
                             }
