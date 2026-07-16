@@ -136,6 +136,12 @@ fn print_machines(machines: &[Machine]) {
             .join("  ");
         println!("{}", line);
     }
+
+    println!("{}", "-".repeat(header.len()));
+    let total_text = format!("Total: {} machines", machines.len());
+    let total_width = UnicodeWidthStr::width(total_text.as_str());
+    let padding = header.len().saturating_sub(total_width);
+    println!("{}{}", " ".repeat(padding), total_text);
 }
 
 fn default_output_path(filename: &str) -> PathBuf {

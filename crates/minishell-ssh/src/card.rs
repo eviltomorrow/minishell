@@ -31,7 +31,7 @@ fn line(width: usize) -> String {
 
 fn info_line(width: usize, content: &str) -> String {
     let visible = UnicodeWidthStr::width(strip_ansi(content).as_str());
-    let padding = width.saturating_sub(visible).saturating_sub(2);
+    let padding = width.saturating_sub(visible + 1);
     format!(" {}{}{}", content, " ".repeat(padding), RESET)
 }
 

@@ -102,13 +102,24 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
     let _ = crossterm::terminal::enable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
 
+    // Initial connection — fail fast, no retry
+    let outcome = try_session(&parsed_addr, config, &term);
+    let mut outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = crossterm::terminal::disable_raw_mode();
+            return Err(e);
+        }
+    };
+
+    // Reconnection loop — only retry if session was established and then lost
     let max_retries = 3;
     let mut retry = 0u32;
 
     loop {
-        match try_session(&parsed_addr, config, &term) {
-            Ok(SessionEnd::Normal) => break,
-            Ok(SessionEnd::Disconnected) | Err(_) => {
+        match outcome {
+            SessionEnd::Normal => break,
+            SessionEnd::Disconnected => {
                 retry += 1;
                 if retry > max_retries {
                     let _ = crossterm::terminal::disable_raw_mode();
@@ -117,14 +128,20 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
                         max_retries
                     );
                 }
-                let delay = retry * 2;
                 let msg = format!(
-                    "\r\n\x1b[2mConnection lost. Reconnecting in {}s... (attempt {}/{})\x1b[0m\r\n",
-                    delay, retry, max_retries
+                    "\r\n\x1b[2mConnection lost. Press any key to reconnect... (attempt {}/{})\x1b[0m\r\n",
+                    retry, max_retries
                 );
                 let _ = std::io::stdout().write_all(msg.as_bytes());
                 let _ = std::io::stdout().flush();
-                std::thread::sleep(Duration::from_secs(delay as u64));
+                let _ = crossterm::event::read();
+                outcome = match try_session(&parsed_addr, config, &term) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        return Err(e);
+                    }
+                };
             }
         }
     }
