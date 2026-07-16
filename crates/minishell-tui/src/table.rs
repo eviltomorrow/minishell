@@ -144,11 +144,11 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
-pub fn format_machine_row(idx: usize, m: &minishell_core::Machine, show_secrets: bool) -> Vec<String> {
+pub fn format_machine_row(m: &minishell_core::Machine, show_secrets: bool) -> Vec<String> {
     let empty = "-".to_string();
     if show_secrets {
         vec![
-            format!("{}", idx + 1),
+            format!("{}", m.num),
             m.ip.clone(),
             "".to_string(),
             if m.nat_ip.is_empty() { empty.clone() } else { m.nat_ip.clone() },
@@ -163,7 +163,7 @@ pub fn format_machine_row(idx: usize, m: &minishell_core::Machine, show_secrets:
         ]
     } else {
         vec![
-            format!("{}", idx + 1),
+            format!("{}", m.num),
             m.ip.clone(),
             "".to_string(),
             if m.nat_ip.is_empty() { empty.clone() } else { m.nat_ip.clone() },

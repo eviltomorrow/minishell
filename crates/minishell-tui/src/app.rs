@@ -98,8 +98,8 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
 }
 
 fn rebuild_table(state: &mut AppState) {
-    let rows: Vec<Vec<String>> = state.machines.iter().enumerate()
-        .map(|(i, m)| format_machine_row(i, m, state.show_secrets))
+    let rows: Vec<Vec<String>> = state.machines.iter()
+        .map(|m| format_machine_row(m, state.show_secrets))
         .collect();
 
     let columns = if state.show_secrets {
@@ -447,10 +447,11 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
                     form.error = Some(err.to_string());
                 } else {
                     form.error = None;
-                    let machine = form.to_machine();
+                    let mut machine = form.to_machine();
                     let result = if form.is_edit {
                         state.store.update_machine(&machine).map_err(|e| e)
                     } else {
+                        machine.num = state.store.max_num().unwrap_or(0) + 1;
                         state.store.import_machines(&[machine]).map(|_| ())
                     };
                     match result {

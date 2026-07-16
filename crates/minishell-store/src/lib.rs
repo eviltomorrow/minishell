@@ -106,6 +106,26 @@ impl Store {
         self.conn.execute("DELETE FROM machines WHERE id=?1", params![id])?;
         Ok(())
     }
+
+    pub fn max_num(&self) -> Result<i32> {
+        let max: i32 = self.conn.query_row("SELECT COALESCE(MAX(num), 0) FROM machines", [], |row| row.get(0))?;
+        Ok(max)
+    }
+
+    pub fn reset_num(&self) -> Result<usize> {
+        let mut stmt = self.conn.prepare("SELECT id FROM machines ORDER BY id")?;
+        let ids: Vec<i64> = stmt.query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let count = ids.len();
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute("UPDATE machines SET num = ?1 WHERE id = ?2", params![i as i32 + 1, id])?;
+        }
+        tx.commit()?;
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

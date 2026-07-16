@@ -42,6 +42,9 @@ enum Commands {
 
     /// Show all machines
     Show,
+
+    /// Reset num column sequentially from 1
+    Resetnum,
 }
 
 fn db_path() -> PathBuf {
@@ -98,9 +101,9 @@ fn print_machines(machines: &[Machine]) {
 
     let or_dash = |s: &str| if s.is_empty() || s == "-" { "-".to_string() } else { s.to_string() };
 
-    let rows: Vec<Vec<String>> = machines.iter().enumerate().map(|(i, m)| {
+    let rows: Vec<Vec<String>> = machines.iter().map(|m| {
         vec![
-            format!("{}", i + 1),
+            format!("{}", m.num),
             m.ip.clone(),
             or_dash(&m.nat_ip),
             format!("{}", m.port),
@@ -164,7 +167,12 @@ fn run() -> Result<()> {
         }
         Some(Commands::Import { path }) => {
             let store = open_db()?;
-            let machines = minishell_xlsx::import_from(PathBuf::from(&path).as_path())?;
+            let mut machines = minishell_xlsx::import_from(PathBuf::from(&path).as_path())?;
+            let mut next = store.max_num()? + 1;
+            for m in &mut machines {
+                m.num = next;
+                next += 1;
+            }
             let count = store.import_machines(&machines)?;
             println!("Imported {} machines ({} skipped)", count, machines.len() - count);
         }
@@ -180,13 +188,18 @@ fn run() -> Result<()> {
             let machines = store.search("")?;
             print_machines(&machines);
         }
+        Some(Commands::Resetnum) => {
+            let store = open_db()?;
+            let count = store.reset_num()?;
+            println!("Reset num for {} machines", count);
+        }
         None => {
             let store = open_db()?;
 
             if let Some(ref query) = cli.query {
-                if let Ok(id) = query.parse::<i64>() {
+                if let Ok(num) = query.parse::<i32>() {
                     let machines = store.search("")?;
-                    if let Some(m) = machines.iter().find(|m| m.id == id) {
+                    if let Some(m) = machines.iter().find(|m| m.num == num) {
                         minishell_ssh::login_to_machine(m)?;
                         return Ok(());
                     }

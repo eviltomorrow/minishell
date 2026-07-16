@@ -35,7 +35,7 @@ All crates depend on `minishell-core`. `minishell-cli` depends on all 5 others.
 - **Selector** (multi-match quick login) uses raw ANSI escape sequences inline, not ratatui
 - **Password/key visibility** toggleable with `s` key — column layout changes dynamically
 - **Edit form** sets empty fields to `"-"` sentinel; edit pre-fills from existing values
-- **`format_machine_row`** uses display index `idx+1`, not `m.num`
+- **`format_machine_row`** uses `m.num` for the `#` column
 - **Session timeout**: 1 hour hard limit in SSH connect loop
 
 ## CLI
