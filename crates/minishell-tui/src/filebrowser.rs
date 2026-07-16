@@ -533,6 +533,26 @@ impl FileBrowserState {
             return;
         }
 
+        let was_expanded = match side {
+            Side::Local => self.local.expanded_dirs.contains(&full_path),
+            Side::Remote => self.remote.expanded_dirs.contains(&full_path),
+        };
+
+        if was_expanded {
+            // Collapse: remove this path and all descendants from expanded_dirs
+            match side {
+                Side::Local => self.local.expanded_dirs.retain(|p| !p.starts_with(&full_path)),
+                Side::Remote => self.remote.expanded_dirs.retain(|p| !p.starts_with(&full_path)),
+            }
+            self.rebuild_panel_tree(side);
+            let count = match side {
+                Side::Local => self.local.tree_entries.len(),
+                Side::Remote => self.remote.tree_entries.len(),
+            };
+            self.status = format!("{} entries", count);
+            return;
+        }
+
         let children = if side == Side::Remote {
             self.children_of_remote(&full_path.to_string_lossy())
         } else {
@@ -541,10 +561,6 @@ impl FileBrowserState {
         if children.is_empty() {
             self.status = format!("{} (empty)",
                 full_path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default());
-            return;
-        }
-
-        if match side { Side::Local => self.local.expanded_dirs.contains(&full_path), Side::Remote => self.remote.expanded_dirs.contains(&full_path) } {
             return;
         }
 
