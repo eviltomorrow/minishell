@@ -48,6 +48,8 @@ minishell import <file.xlsx>
 minishell export [path]
 minishell tpl [path]
 minishell version
+minishell push [-r] <query> <local> <remote>
+minishell pull [-r] <query> <remote> <local>
 ```
 
 ## Version info

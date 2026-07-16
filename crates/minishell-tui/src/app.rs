@@ -28,6 +28,7 @@ pub struct AppState {
     pub filebrowser: Option<FileBrowserState>,
     pub should_quit: bool,
     pub login_target: Option<Machine>,
+
 }
 
 pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
@@ -92,7 +93,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                     fb.render(f);
                 }
             })?;
-            if crossterm::event::poll(Duration::from_millis(200))? {
+            if crossterm::event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
                         state.should_quit = true;
@@ -453,12 +454,7 @@ fn update(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Char('b') => {
             if let Some(m) = state.machines.get(state.table.cursor()).cloned() {
-                let mut fb = FileBrowserState::new(m);
-                let ok = fb.connect().is_ok();
-                if ok {
-                    fb.init_dirs();
-                }
-                state.filebrowser = Some(fb);
+                state.filebrowser = Some(FileBrowserState::new(m));
             }
         }
         _ => {}
