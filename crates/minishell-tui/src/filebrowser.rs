@@ -432,15 +432,21 @@ impl FileBrowserState {
         let mut new_entries: Vec<TreeEntry> = Vec::new();
         Self::append_tree_entries(&mut new_entries, &entries, &current_path, &expanded_dirs, 0, self, &children_fn);
 
+        let set_tree = |panel: &mut PanelState, entries: Vec<TreeEntry>| {
+            let saved = panel.tree_entries.get(panel.cursor).map(|te| (te.entry.name.clone(), te.depth));
+            panel.tree_entries = entries;
+            if let Some((ref name, depth)) = saved {
+                if let Some(pos) = panel.tree_entries.iter().position(|te| te.entry.name == *name && te.depth == depth) {
+                    panel.cursor = pos;
+                    return;
+                }
+            }
+            panel.cursor = panel.cursor.min(panel.tree_entries.len().saturating_sub(1));
+        };
+
         match side {
-            Side::Local => {
-                self.local.tree_entries = new_entries;
-                self.local.cursor = self.local.cursor.min(self.local.tree_entries.len().saturating_sub(1));
-            }
-            Side::Remote => {
-                self.remote.tree_entries = new_entries;
-                self.remote.cursor = self.remote.cursor.min(self.remote.tree_entries.len().saturating_sub(1));
-            }
+            Side::Local => set_tree(&mut self.local, new_entries),
+            Side::Remote => set_tree(&mut self.remote, new_entries),
         }
     }
 
