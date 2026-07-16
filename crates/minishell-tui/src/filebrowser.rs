@@ -1137,6 +1137,21 @@ impl FileBrowserState {
                 ]
             } else if self.pending.is_some() {
                 vec![Span::styled("(transferring...)", styles::help_style())]
+            } else if self.active_panel().tree_mode {
+                vec![
+                    Span::styled("Tab", styles::key_style()),
+                    Span::styled(":panel  ", styles::help_style()),
+                    Span::styled("\u{2191}\u{2193}", styles::key_style()),
+                    Span::styled(":move  ", styles::help_style()),
+                    Span::styled("\u{2192}", styles::key_style()),
+                    Span::styled(":enter  ", styles::help_style()),
+                    Span::styled("\u{2190}", styles::key_style()),
+                    Span::styled(":back  ", styles::help_style()),
+                    Span::styled("t", styles::key_style()),
+                    Span::styled(":tree  ", styles::help_style()),
+                    Span::styled("q", styles::key_style()),
+                    Span::styled(":quit", styles::help_style()),
+                ]
             } else {
                 vec![
                     Span::styled("Tab", styles::key_style()),
@@ -1155,6 +1170,8 @@ impl FileBrowserState {
                     Span::styled(":del  ", styles::help_style()),
                     Span::styled("r", styles::key_style()),
                     Span::styled(":rename  ", styles::help_style()),
+                    Span::styled("t", styles::key_style()),
+                    Span::styled(":tree  ", styles::help_style()),
                     Span::styled("q", styles::key_style()),
                     Span::styled(":quit", styles::help_style()),
                 ]
