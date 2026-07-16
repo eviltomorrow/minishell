@@ -421,37 +421,16 @@ impl FileBrowserState {
             }
         }
 
-        let mut new_entries: Vec<TreeEntry> = Vec::new();
-        for entry in &entries {
-            new_entries.push(TreeEntry { entry: entry.clone(), depth: 0 });
-            if !entry.is_dir { continue; }
-            let dir_path = current_path.join(&entry.name);
-            if !expanded_dirs.contains(&dir_path) { continue; }
-
-            let children = if side == Side::Remote {
-                self.children_of_remote(&dir_path.to_string_lossy())
+        let children_fn = |this: &mut FileBrowserState, p: &Path| -> Vec<FileEntry> {
+            if side == Side::Remote {
+                this.children_of_remote(&p.to_string_lossy())
             } else {
-                self.children_of_local(&dir_path)
-            };
-
-            for child in &children {
-                let child_name = child.name.clone();
-                let child_is_dir = child.is_dir;
-                new_entries.push(TreeEntry { entry: child.clone(), depth: 1 });
-                if child_is_dir {
-                    let child_path = dir_path.join(&child_name);
-                    if expanded_dirs.contains(&child_path) {
-                        for g in if side == Side::Remote {
-                            self.children_of_remote(&child_path.to_string_lossy())
-                        } else {
-                            self.children_of_local(&child_path)
-                        } {
-                            new_entries.push(TreeEntry { entry: g, depth: 2 });
-                        }
-                    }
-                }
+                this.children_of_local(p)
             }
-        }
+        };
+
+        let mut new_entries: Vec<TreeEntry> = Vec::new();
+        Self::append_tree_entries(&mut new_entries, &entries, &current_path, &expanded_dirs, 0, self, &children_fn);
 
         match side {
             Side::Local => {
@@ -462,6 +441,29 @@ impl FileBrowserState {
                 self.remote.tree_entries = new_entries;
                 self.remote.cursor = self.remote.cursor.min(self.remote.tree_entries.len().saturating_sub(1));
             }
+        }
+    }
+
+    fn append_tree_entries(
+        result: &mut Vec<TreeEntry>,
+        entries: &[FileEntry],
+        base_path: &Path,
+        expanded_dirs: &[PathBuf],
+        depth: usize,
+        this: &mut FileBrowserState,
+        children_fn: &dyn Fn(&mut FileBrowserState, &Path) -> Vec<FileEntry>,
+    ) {
+        for entry in entries {
+            result.push(TreeEntry { entry: entry.clone(), depth });
+            if !entry.is_dir {
+                continue;
+            }
+            let dir_path = base_path.join(&entry.name);
+            if !expanded_dirs.contains(&dir_path) {
+                continue;
+            }
+            let children = children_fn(this, &dir_path);
+            Self::append_tree_entries(result, &children, &dir_path, expanded_dirs, depth + 1, this, children_fn);
         }
     }
 
