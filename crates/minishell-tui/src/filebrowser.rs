@@ -435,7 +435,21 @@ impl FileBrowserState {
             };
 
             for child in &children {
+                let child_name = child.name.clone();
+                let child_is_dir = child.is_dir;
                 new_entries.push(TreeEntry { entry: child.clone(), depth: 1 });
+                if child_is_dir {
+                    let child_path = dir_path.join(&child_name);
+                    if expanded_dirs.contains(&child_path) {
+                        for g in if side == Side::Remote {
+                            self.children_of_remote(&child_path.to_string_lossy())
+                        } else {
+                            self.children_of_local(&child_path)
+                        } {
+                            new_entries.push(TreeEntry { entry: g, depth: 2 });
+                        }
+                    }
+                }
             }
         }
 
