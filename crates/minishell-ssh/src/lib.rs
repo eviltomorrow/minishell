@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, Context};
 use minishell_core::Machine;
 
+#[derive(Clone)]
 pub struct ConnectConfig {
     pub username: String,
     pub password: String,
@@ -88,22 +89,13 @@ fn run_session_loop(channel: &mut ssh2::Channel, session_fd: RawFd) -> SessionEn
 }
 
 pub fn connect(config: &ConnectConfig) -> Result<()> {
-    let addr = format!("{}:{}", config.host, config.port);
-    let parsed_addr: std::net::SocketAddr = match addr.parse() {
-        Ok(addr) => addr,
-        Err(_) => addr
-            .to_socket_addrs()
-            .context("Failed to resolve hostname")?
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No addresses found for hostname"))?,
-    };
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
 
     let _ = crossterm::terminal::enable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
 
     // Initial connection — fail fast, no retry
-    let outcome = try_session(&parsed_addr, config, &term);
+    let outcome = try_session(config, &term);
     let mut outcome = match outcome {
         Ok(o) => o,
         Err(e) => {
@@ -135,7 +127,7 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
                 let _ = std::io::stdout().write_all(msg.as_bytes());
                 let _ = std::io::stdout().flush();
                 let _ = crossterm::event::read();
-                outcome = match try_session(&parsed_addr, config, &term) {
+                outcome = match try_session(config, &term) {
                     Ok(o) => o,
                     Err(e) => {
                         let _ = crossterm::terminal::disable_raw_mode();
@@ -150,14 +142,19 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
     Ok(())
 }
 
-fn try_session(
-    addr: &std::net::SocketAddr,
-    config: &ConnectConfig,
-    term: &str,
-) -> Result<SessionEnd> {
-    let tcp = TcpStream::connect_timeout(addr, config.timeout)
+pub fn create_session(config: &ConnectConfig) -> Result<ssh2::Session> {
+    let addr = format!("{}:{}", config.host, config.port);
+    let parsed_addr: std::net::SocketAddr = match addr.parse() {
+        Ok(addr) => addr,
+        Err(_) => addr
+            .to_socket_addrs()
+            .context("Failed to resolve hostname")?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No addresses found for hostname"))?,
+    };
+
+    let tcp = TcpStream::connect_timeout(&parsed_addr, config.timeout)
         .with_context(|| format!("Failed to connect to {}:{}", config.host, config.port))?;
-    let session_fd = tcp.as_raw_fd();
 
     let mut session = ssh2::Session::new().context("Failed to create SSH session")?;
     session.set_tcp_stream(tcp);
@@ -181,6 +178,16 @@ fn try_session(
     if !session.authenticated() {
         anyhow::bail!("Authentication failed");
     }
+
+    Ok(session)
+}
+
+fn try_session(
+    config: &ConnectConfig,
+    term: &str,
+) -> Result<SessionEnd> {
+    let session = create_session(config)?;
+    let session_fd = session.as_raw_fd();
 
     let mut channel = session.channel_session().context("Failed to open channel")?;
 
