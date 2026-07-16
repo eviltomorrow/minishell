@@ -436,9 +436,61 @@ impl FileBrowserState {
         self.status = format!("{} entries", p.entries.len());
     }
 
+    pub fn toggle_tree(&mut self) {
+        let is_tree = self.active_panel().tree_mode;
+        if is_tree {
+            {
+                let p = self.active_panel_mut();
+                p.tree_mode = false;
+                p.tree_entries.clear();
+            }
+            self.refresh_panel(self.active_side);
+            let count = self.active_panel().entries.len();
+            self.status = format!("{} entries", count);
+        } else {
+            if self.active_side == Side::Remote && self.session.is_none() {
+                self.status = "Not connected".to_string();
+                return;
+            }
+
+            let tree_entries = if self.active_side == Side::Remote {
+                let session = match self.session.as_ref() {
+                    Some(s) => s,
+                    None => return,
+                };
+                let sftp = match session.sftp() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.status = format!("SFTP error: {}", e);
+                        return;
+                    }
+                };
+                let path = self.active_panel().current_path.to_string_lossy().to_string();
+                self.build_tree_remote(&sftp, &path, 2)
+            } else {
+                let path = self.active_panel().current_path.clone();
+                self.build_tree_local(&path, 2)
+            };
+
+            let count = tree_entries.len();
+            {
+                let p = self.active_panel_mut();
+                p.tree_entries = tree_entries;
+                p.tree_mode = true;
+                p.cursor = 0;
+                p.scroll_offset = 0;
+            }
+            self.status = format!("{} entries (tree)", count);
+        }
+    }
+
     fn move_cursor(&mut self, delta: isize, visible_rows: usize) {
         let panel = self.active_panel_mut();
-        let len = panel.entries.len();
+        let len = if panel.tree_mode {
+            panel.tree_entries.len()
+        } else {
+            panel.entries.len()
+        };
         if len == 0 {
             return;
         }
@@ -453,7 +505,8 @@ impl FileBrowserState {
 
     fn cursor_first(&mut self) {
         let panel = self.active_panel_mut();
-        if !panel.entries.is_empty() {
+        let len = if panel.tree_mode { panel.tree_entries.len() } else { panel.entries.len() };
+        if len > 0 {
             panel.cursor = 0;
             panel.scroll_offset = 0;
         }
@@ -461,7 +514,7 @@ impl FileBrowserState {
 
     fn cursor_last(&mut self, visible_rows: usize) {
         let panel = self.active_panel_mut();
-        let len = panel.entries.len();
+        let len = if panel.tree_mode { panel.tree_entries.len() } else { panel.entries.len() };
         if len > 0 {
             panel.cursor = len - 1;
             if panel.cursor >= panel.scroll_offset + visible_rows {
@@ -473,10 +526,15 @@ impl FileBrowserState {
     fn enter_dir(&mut self) {
         let (new_path, dir_name) = {
             let p = self.active_panel();
-            if p.entries.is_empty() {
+            let len = if p.tree_mode { p.tree_entries.len() } else { p.entries.len() };
+            if len == 0 {
                 return;
             }
-            let entry = &p.entries[p.cursor];
+            let entry = if p.tree_mode {
+                &p.tree_entries[p.cursor].entry
+            } else {
+                &p.entries[p.cursor]
+            };
             if entry.is_dir {
                 let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
                 (p.current_path.join(&entry.name), dir_name)
@@ -488,6 +546,8 @@ impl FileBrowserState {
         };
         {
             let p = self.active_panel_mut();
+            p.tree_mode = false;
+            p.tree_entries.clear();
             p.prev_dir_name = Some(dir_name);
             p.current_path = new_path;
             p.cursor = 0;
@@ -497,14 +557,23 @@ impl FileBrowserState {
     }
 
     fn goto_root(&mut self) {
-        let panel = self.active_panel_mut();
-        panel.current_path = PathBuf::from("/");
-        panel.cursor = 0;
-        panel.scroll_offset = 0;
+        {
+            let panel = self.active_panel_mut();
+            panel.tree_mode = false;
+            panel.tree_entries.clear();
+            panel.current_path = PathBuf::from("/");
+            panel.cursor = 0;
+            panel.scroll_offset = 0;
+        }
         self.refresh_panel(self.active_side);
     }
 
     fn goto_home(&mut self) {
+        {
+            let panel = self.active_panel_mut();
+            panel.tree_mode = false;
+            panel.tree_entries.clear();
+        }
         if self.active_side == Side::Remote {
             let home = if self.machine.username == "root" {
                 PathBuf::from("/root")
@@ -538,6 +607,8 @@ impl FileBrowserState {
         if let Some(path) = parent {
             {
                 let p = self.active_panel_mut();
+                p.tree_mode = false;
+                p.tree_entries.clear();
                 p.current_path = path;
                 p.cursor = 0;
                 p.scroll_offset = 0;
@@ -898,6 +969,15 @@ impl FileBrowserState {
             return;
         }
 
+        if self.active_panel().tree_mode {
+            match key.code {
+                KeyCode::Char('u') | KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Char('r') => {
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Up => self.move_cursor(-1, self.visible_rows),
             KeyCode::Down => self.move_cursor(1, self.visible_rows),
@@ -912,6 +992,7 @@ impl FileBrowserState {
             KeyCode::Char('d') => self.download_selected(),
             KeyCode::Char('x') => self.start_delete(),
             KeyCode::Char('r') => self.start_rename(),
+            KeyCode::Char('t') => self.toggle_tree(),
             _ => {}
         }
     }
