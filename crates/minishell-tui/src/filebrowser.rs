@@ -421,18 +421,10 @@ impl FileBrowserState {
             }
         }
 
-        let children_fn = |this: &mut FileBrowserState, p: &Path| -> Vec<FileEntry> {
-            if side == Side::Remote {
-                this.children_of_remote(&p.to_string_lossy())
-            } else {
-                this.children_of_local(p)
-            }
-        };
+        let mut new_entries = Vec::new();
+        self.append_tree_entries(&mut new_entries, &entries, &current_path, &expanded_dirs, 0, side);
 
-        let mut new_entries: Vec<TreeEntry> = Vec::new();
-        Self::append_tree_entries(&mut new_entries, &entries, &current_path, &expanded_dirs, 0, self, &children_fn);
-
-        let set_tree = |panel: &mut PanelState, entries: Vec<TreeEntry>| {
+        let apply_tree = |panel: &mut PanelState, entries: Vec<TreeEntry>| {
             let saved = panel.tree_entries.get(panel.cursor).map(|te| (te.entry.name.clone(), te.depth));
             panel.tree_entries = entries;
             if let Some((ref name, depth)) = saved {
@@ -445,31 +437,31 @@ impl FileBrowserState {
         };
 
         match side {
-            Side::Local => set_tree(&mut self.local, new_entries),
-            Side::Remote => set_tree(&mut self.remote, new_entries),
+            Side::Local => apply_tree(&mut self.local, new_entries),
+            Side::Remote => apply_tree(&mut self.remote, new_entries),
         }
     }
 
     fn append_tree_entries(
+        &mut self,
         result: &mut Vec<TreeEntry>,
         entries: &[FileEntry],
         base_path: &Path,
         expanded_dirs: &[PathBuf],
         depth: usize,
-        this: &mut FileBrowserState,
-        children_fn: &dyn Fn(&mut FileBrowserState, &Path) -> Vec<FileEntry>,
+        side: Side,
     ) {
         for entry in entries {
             result.push(TreeEntry { entry: entry.clone(), depth });
-            if !entry.is_dir {
-                continue;
-            }
+            if !entry.is_dir { continue; }
             let dir_path = base_path.join(&entry.name);
-            if !expanded_dirs.contains(&dir_path) {
-                continue;
-            }
-            let children = children_fn(this, &dir_path);
-            Self::append_tree_entries(result, &children, &dir_path, expanded_dirs, depth + 1, this, children_fn);
+            if !expanded_dirs.contains(&dir_path) { continue; }
+            let children = if side == Side::Remote {
+                self.children_of_remote(&dir_path.to_string_lossy())
+            } else {
+                self.children_of_local(&dir_path)
+            };
+            self.append_tree_entries(result, &children, &dir_path, expanded_dirs, depth + 1, side);
         }
     }
 
@@ -482,7 +474,8 @@ impl FileBrowserState {
     pub fn toggle_side(&mut self) {
         self.active_side = self.active_side.other();
         let p = self.active_panel();
-        self.status = format!("{} entries", p.entries.len());
+        let count = if p.expanded_dirs.is_empty() { p.entries.len() } else { p.tree_entries.len() };
+        self.status = format!("{} entries", count);
     }
 
     fn tree_entry_full_path(panel: &PanelState, cursor: usize) -> PathBuf {
