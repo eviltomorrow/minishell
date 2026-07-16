@@ -73,7 +73,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
     loop {
         if let Some(machine) = state.login_target.take() {
             terminal.clear()?;
-            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
+            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen, DisableBracketedPaste);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = minishell_ssh::login_to_machine(&machine);
             break;
@@ -89,7 +89,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
 
         if state.should_quit {
             let _ = crossterm::terminal::disable_raw_mode();
-            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen);
+            let _ = crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen, DisableBracketedPaste);
             break;
         }
     }
