@@ -1281,7 +1281,12 @@ impl FileBrowserState {
         );
 
         // Empty directory hint
-        if panel.entries.is_empty() {
+        let entry_count = if panel.tree_mode {
+            panel.tree_entries.len()
+        } else {
+            panel.entries.len()
+        };
+        if entry_count == 0 {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "  (empty)",
@@ -1319,10 +1324,15 @@ impl FileBrowserState {
 
         for i in 0..visible {
             let idx = panel.scroll_offset + i;
-            if idx >= panel.entries.len() {
+            if idx >= entry_count {
                 break;
             }
-            let entry = &panel.entries[idx];
+            let (entry, display_depth) = if panel.tree_mode {
+                let te = &panel.tree_entries[idx];
+                (&te.entry, te.depth)
+            } else {
+                (&panel.entries[idx], 0)
+            };
             let is_selected = idx == panel.cursor;
             let style = if is_selected {
                 selected_style
@@ -1338,8 +1348,9 @@ impl FileBrowserState {
                 " "
             };
             let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+            let indent = "  ".repeat(display_depth);
             let short_name = entry.name.rsplit('/').next().unwrap_or(&entry.name);
-            let name = format!("{}{} {}", marker, icon, short_name);
+            let name = format!("{}{}{}{}", marker, indent, icon, short_name);
 
             let display_name = truncate_to_width(&name, name_area);
             let display_name_padded = pad_right(&display_name, name_area);
