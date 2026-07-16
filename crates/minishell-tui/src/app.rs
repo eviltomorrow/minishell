@@ -12,6 +12,7 @@ use minishell_store::Store;
 
 use super::form::{FormState, DeleteState};
 use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths};
+use super::filebrowser::FileBrowserState;
 use super::styles;
 
 pub struct AppState {
@@ -23,6 +24,7 @@ pub struct AppState {
     pub show_secrets: bool,
     pub form: Option<FormState>,
     pub delete_confirm: Option<DeleteState>,
+    pub filebrowser: Option<FileBrowserState>,
     pub should_quit: bool,
     pub login_target: Option<Machine>,
 }
@@ -63,6 +65,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
         show_secrets: false,
         form: None,
         delete_confirm: None,
+        filebrowser: None,
         should_quit: false,
         login_target: None,
     };
@@ -79,12 +82,35 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
             break;
         }
 
-        terminal.draw(|f| view(f, &mut state))?;
+        if state.filebrowser.is_some() {
+            if let Some(ref mut fb) = state.filebrowser {
+                fb.check_pending();
+            }
+            terminal.draw(|f| {
+                if let Some(ref fb) = state.filebrowser {
+                    fb.render(f);
+                }
+            })?;
+            match event::read()? {
+                Event::Key(key) => {
+                    if let Some(ref mut fb) = state.filebrowser {
+                        if fb.wants_quit(&key) {
+                            state.filebrowser = None;
+                        } else {
+                            fb.handle_key(key);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            terminal.draw(|f| view(f, &mut state))?;
 
-        match event::read()? {
-            Event::Key(key) => update(&mut state, key),
-            Event::Paste(data) => handle_paste(&mut state, &data),
-            _ => {}
+            match event::read()? {
+                Event::Key(key) => update(&mut state, key),
+                Event::Paste(data) => handle_paste(&mut state, &data),
+                _ => {}
+            }
         }
 
         if state.should_quit {
@@ -188,6 +214,7 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     let help_items: Vec<(&str, &str)> = vec![
         ("↑↓", "sel"),
         ("↵", "login"),
+        ("b", "browse"),
         ("e", "edit"),
         ("a", "add"),
         ("d", "del"),
@@ -421,6 +448,16 @@ fn update(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('s') => {
             state.show_secrets = !state.show_secrets;
             rebuild_table(state);
+        }
+        KeyCode::Char('b') => {
+            if let Some(m) = state.machines.get(state.table.cursor()).cloned() {
+                let mut fb = FileBrowserState::new(m);
+                let ok = fb.connect().is_ok();
+                if ok {
+                    fb.init_dirs();
+                }
+                state.filebrowser = Some(fb);
+            }
         }
         _ => {}
     }
