@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use minishell_core::Machine;
-use minishell_ssh::sftp::{self, FileEntry, format_modified, format_perm};
+use minishell_ssh::sftp::{self, FileEntry, Sftp, format_modified, format_perm};
 use minishell_ssh::ConnectConfig;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -352,6 +352,82 @@ impl FileBrowserState {
             Side::Local => self.refresh_local(),
             Side::Remote => self.refresh_remote(),
         }
+    }
+
+    fn build_tree_local(&self, path: &Path, max_depth: usize) -> Vec<TreeEntry> {
+        self.build_tree_local_recursive(path, max_depth, 0)
+    }
+
+    fn build_tree_local_recursive(&self, path: &Path, max_depth: usize, depth: usize) -> Vec<TreeEntry> {
+        let mut result = Vec::new();
+
+        let read_dir = match std::fs::read_dir(path) {
+            Ok(d) => d,
+            Err(_) => return result,
+        };
+
+        let mut entries: Vec<FileEntry> = Vec::new();
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let meta = entry.metadata().ok();
+            let modified = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| format_modified(Some(d.as_secs())))
+                .unwrap_or_default();
+            let perm = meta.as_ref().map(|m| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    format_perm(Some(m.permissions().mode() & 0o777), m.is_dir())
+                }
+                #[cfg(not(unix))]
+                { String::new() }
+            }).unwrap_or_default();
+            entries.push(FileEntry {
+                name,
+                is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                modified,
+                perm,
+            });
+        }
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+
+        for entry in entries {
+            result.push(TreeEntry { entry: entry.clone(), depth });
+            if entry.is_dir && depth < max_depth {
+                let child_path = path.join(&entry.name);
+                result.append(&mut self.build_tree_local_recursive(&child_path, max_depth, depth + 1));
+            }
+        }
+        result
+    }
+
+    fn build_tree_remote(&self, sftp: &Sftp, path: &str, max_depth: usize) -> Vec<TreeEntry> {
+        self.build_tree_remote_recursive(sftp, path, max_depth, 0)
+    }
+
+    fn build_tree_remote_recursive(&self, sftp: &Sftp, path: &str, max_depth: usize, depth: usize) -> Vec<TreeEntry> {
+        let mut result = Vec::new();
+
+        let entries = match sftp::list_dir(sftp, path) {
+            Ok(e) => e,
+            Err(_) => return result,
+        };
+
+        for entry in entries {
+            result.push(TreeEntry { entry: entry.clone(), depth });
+            if entry.is_dir && depth < max_depth {
+                let child_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+                result.append(&mut self.build_tree_remote_recursive(sftp, &child_path, max_depth, depth + 1));
+            }
+        }
+        result
     }
 
     pub fn toggle_side(&mut self) {
