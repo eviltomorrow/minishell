@@ -479,6 +479,31 @@ impl FileBrowserState {
         self.status = format!("{} entries", p.entries.len());
     }
 
+    fn tree_entry_full_path(panel: &PanelState, cursor: usize) -> PathBuf {
+        let te = &panel.tree_entries[cursor];
+        if te.depth == 0 {
+            return panel.current_path.join(&te.entry.name);
+        }
+        let mut ancestors: Vec<&str> = Vec::new();
+        let mut need = te.depth;
+        for i in (0..cursor).rev() {
+            let prev = &panel.tree_entries[i];
+            if prev.depth == need - 1 {
+                ancestors.push(&prev.entry.name);
+                need = prev.depth;
+                if need == 0 {
+                    break;
+                }
+            }
+        }
+        ancestors.reverse();
+        let mut path = panel.current_path.clone();
+        for a in ancestors {
+            path = path.join(a);
+        }
+        path.join(&te.entry.name)
+    }
+
     pub fn toggle_tree(&mut self) {
         if self.active_side == Side::Remote && self.session.is_none() {
             self.status = "Not connected".to_string();
@@ -494,24 +519,7 @@ impl FileBrowserState {
             if !entry.entry.is_dir {
                 return;
             }
-            let depth = entry.depth;
-            let path = if depth == 0 {
-                p.current_path.join(&entry.entry.name)
-            } else {
-                let mut path = p.current_path.clone();
-                let mut need = depth;
-                for i in (0..p.cursor).rev() {
-                    let prev = &p.tree_entries[i];
-                    if prev.depth == need - 1 {
-                        path = path.join(&prev.entry.name);
-                        need = prev.depth;
-                        if need == 0 {
-                            break;
-                        }
-                    }
-                }
-                path.join(&entry.entry.name)
-            };
+            let path = Self::tree_entry_full_path(p, p.cursor);
             (path, entry.entry.is_dir, self.active_side)
         };
 
@@ -597,24 +605,7 @@ impl FileBrowserState {
                 return;
             }
             let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
-            let depth = p.tree_entries[p.cursor].depth;
-            let new_path = if depth == 0 {
-                p.current_path.join(&entry.name)
-            } else {
-                let mut path = p.current_path.clone();
-                let mut need = depth;
-                for i in (0..p.cursor).rev() {
-                    let prev = &p.tree_entries[i];
-                    if prev.depth == need - 1 {
-                        path = path.join(&prev.entry.name);
-                        need = prev.depth;
-                        if need == 0 {
-                            break;
-                        }
-                    }
-                }
-                path.join(&entry.name)
-            };
+            let new_path = Self::tree_entry_full_path(p, p.cursor);
             (new_path, dir_name)
         };
         {
