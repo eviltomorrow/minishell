@@ -632,13 +632,23 @@ impl FileBrowserState {
             }
             let entry = &p.tree_entries[p.cursor].entry;
             if !entry.is_dir {
-                let size_str = sftp::format_size(entry.size);
-                self.status = format!("{} ({})", entry.name, size_str);
-                return;
+                let file_path = Self::tree_entry_full_path(p, p.cursor);
+                if let Some(parent) = file_path.parent() {
+                    if parent == p.current_path {
+                        let size_str = sftp::format_size(entry.size);
+                        self.status = format!("{} ({})", entry.name, size_str);
+                        return;
+                    }
+                    let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+                    (parent.to_path_buf(), dir_name)
+                } else {
+                    return;
+                }
+            } else {
+                let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+                let new_path = Self::tree_entry_full_path(p, p.cursor);
+                (new_path, dir_name)
             }
-            let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
-            let new_path = Self::tree_entry_full_path(p, p.cursor);
-            (new_path, dir_name)
         };
         {
             let p = self.active_panel_mut();
