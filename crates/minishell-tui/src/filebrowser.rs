@@ -479,7 +479,7 @@ impl FileBrowserState {
             (cursor, path, entry_clone, entries_before, entries_after, self.active_side == Side::Remote)
         };
 
-        let children = if is_remote {
+        let children: Vec<TreeEntry> = if is_remote {
             let session = match self.session.as_ref() {
                 Some(s) => s,
                 None => return,
@@ -492,9 +492,11 @@ impl FileBrowserState {
                 }
             };
             let path_str = path.to_string_lossy().to_string();
-            self.build_tree_remote(&sftp, &path_str, 2)
+            self.build_tree_remote(&sftp, &path_str, 1)
+                .into_iter().map(|mut te| { te.depth += 1; te }).collect()
         } else {
-            self.build_tree_local(&path, 2)
+            self.build_tree_local(&path, 1)
+                .into_iter().map(|mut te| { te.depth += 1; te }).collect()
         };
 
         let p = self.active_panel_mut();
