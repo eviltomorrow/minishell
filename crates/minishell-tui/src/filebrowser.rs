@@ -519,44 +519,30 @@ impl FileBrowserState {
             return;
         }
 
-        let was_expanded = match side {
-            Side::Local => self.local.expanded_dirs.contains(&full_path),
-            Side::Remote => self.remote.expanded_dirs.contains(&full_path),
-        };
-
-        if was_expanded {
-            match side {
-                Side::Local => self.local.expanded_dirs.retain(|p| p != &full_path),
-                Side::Remote => self.remote.expanded_dirs.retain(|p| p != &full_path),
-            }
-            self.rebuild_panel_tree(side);
-            let count = match side {
-                Side::Local => self.local.tree_entries.len(),
-                Side::Remote => self.remote.tree_entries.len(),
-            };
-            self.status = format!("{} entries", count);
-        } else {
-            let children = if side == Side::Remote {
-                self.children_of_remote(&full_path.to_string_lossy())
-            } else {
-                self.children_of_local(&full_path)
-            };
-            if children.is_empty() {
-                self.status = format!("{} (empty)",
-                    full_path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default());
-                return;
-            }
-            match side {
-                Side::Local => self.local.expanded_dirs.push(full_path),
-                Side::Remote => self.remote.expanded_dirs.push(full_path),
-            }
-            self.rebuild_panel_tree(side);
-            let count = match side {
-                Side::Local => self.local.tree_entries.len(),
-                Side::Remote => self.remote.tree_entries.len(),
-            };
-            self.status = format!("{} entries", count);
+        if match side { Side::Local => self.local.expanded_dirs.contains(&full_path), Side::Remote => self.remote.expanded_dirs.contains(&full_path) } {
+            return;
         }
+
+        let children = if side == Side::Remote {
+            self.children_of_remote(&full_path.to_string_lossy())
+        } else {
+            self.children_of_local(&full_path)
+        };
+        if children.is_empty() {
+            self.status = format!("{} (empty)",
+                full_path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default());
+            return;
+        }
+        match side {
+            Side::Local => self.local.expanded_dirs.push(full_path),
+            Side::Remote => self.remote.expanded_dirs.push(full_path),
+        }
+        self.rebuild_panel_tree(side);
+        let count = match side {
+            Side::Local => self.local.tree_entries.len(),
+            Side::Remote => self.remote.tree_entries.len(),
+        };
+        self.status = format!("{} entries", count);
     }
 
     fn move_cursor(&mut self, delta: isize, visible_rows: usize) {
