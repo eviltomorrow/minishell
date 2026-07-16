@@ -48,6 +48,9 @@ struct PanelState {
     prev_dir_name: Option<String>,
     tree_mode: bool,
     tree_entries: Vec<TreeEntry>,
+    backup_entries: Vec<FileEntry>,
+    backup_cursor: usize,
+    backup_scroll_offset: usize,
 }
 
 impl PanelState {
@@ -60,6 +63,9 @@ impl PanelState {
             prev_dir_name: None,
             tree_mode: false,
             tree_entries: Vec::new(),
+            backup_entries: Vec::new(),
+            backup_cursor: 0,
+            backup_scroll_offset: 0,
         }
     }
 }
@@ -435,55 +441,84 @@ impl FileBrowserState {
         let p = self.active_panel_mut();
         p.tree_mode = false;
         p.tree_entries.clear();
+        p.backup_entries.clear();
         self.status = format!("{} entries", p.entries.len());
     }
 
     pub fn toggle_tree(&mut self) {
-        let is_tree = self.active_panel().tree_mode;
-        if is_tree {
-            {
-                let p = self.active_panel_mut();
-                p.tree_mode = false;
-                p.tree_entries.clear();
-            }
-            self.refresh_panel(self.active_side);
-            let count = self.active_panel().entries.len();
-            self.status = format!("{} entries", count);
-        } else {
-            if self.active_side == Side::Remote && self.session.is_none() {
-                self.status = "Not connected".to_string();
+        if self.active_panel().tree_mode {
+            let p = self.active_panel_mut();
+            p.tree_mode = false;
+            p.tree_entries.clear();
+            p.entries = p.backup_entries.split_off(0);
+            p.cursor = p.backup_cursor;
+            p.scroll_offset = p.backup_scroll_offset;
+            self.status = format!("{} entries", p.entries.len());
+            return;
+        }
+
+        if self.active_side == Side::Remote && self.session.is_none() {
+            self.status = "Not connected".to_string();
+            return;
+        }
+
+        let (cursor, path, entry_clone, entries_before, entries_after, is_remote) = {
+            let p = self.active_panel();
+            if p.entries.is_empty() {
                 return;
             }
-
-            let tree_entries = if self.active_side == Side::Remote {
-                let session = match self.session.as_ref() {
-                    Some(s) => s,
-                    None => return,
-                };
-                let sftp = match session.sftp() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        self.status = format!("SFTP error: {}", e);
-                        return;
-                    }
-                };
-                let path = self.active_panel().current_path.to_string_lossy().to_string();
-                self.build_tree_remote(&sftp, &path, 2)
-            } else {
-                let path = self.active_panel().current_path.clone();
-                self.build_tree_local(&path, 2)
-            };
-
-            let count = tree_entries.len();
-            {
-                let p = self.active_panel_mut();
-                p.tree_entries = tree_entries;
-                p.tree_mode = true;
-                p.cursor = 0;
-                p.scroll_offset = 0;
+            let entry = &p.entries[p.cursor];
+            if !entry.is_dir {
+                return;
             }
-            self.status = format!("{} entries (tree)", count);
+            let cursor = p.cursor;
+            let path = p.current_path.join(&entry.name);
+            let entry_clone = entry.clone();
+            let entries_before = p.entries[..cursor].to_vec();
+            let entries_after = p.entries[cursor + 1..].to_vec();
+            (cursor, path, entry_clone, entries_before, entries_after, self.active_side == Side::Remote)
+        };
+
+        let children = if is_remote {
+            let session = match self.session.as_ref() {
+                Some(s) => s,
+                None => return,
+            };
+            let sftp = match session.sftp() {
+                Ok(s) => s,
+                Err(e) => {
+                    self.status = format!("SFTP error: {}", e);
+                    return;
+                }
+            };
+            let path_str = path.to_string_lossy().to_string();
+            self.build_tree_remote(&sftp, &path_str, 2)
+        } else {
+            self.build_tree_local(&path, 2)
+        };
+
+        let p = self.active_panel_mut();
+        p.backup_entries = p.entries.clone();
+        p.backup_cursor = cursor;
+        p.backup_scroll_offset = p.scroll_offset;
+
+        let mut new_entries: Vec<TreeEntry> = Vec::with_capacity(
+            entries_before.len() + 1 + children.len() + entries_after.len()
+        );
+        for e in &entries_before {
+            new_entries.push(TreeEntry { entry: e.clone(), depth: 0 });
         }
+        new_entries.push(TreeEntry { entry: entry_clone, depth: 0 });
+        new_entries.extend(children);
+        for e in &entries_after {
+            new_entries.push(TreeEntry { entry: e.clone(), depth: 0 });
+        }
+
+        p.tree_entries = new_entries;
+        p.tree_mode = true;
+        p.cursor = cursor;
+        p.scroll_offset = 0;
+        self.status = format!("{} entries (tree)", p.tree_entries.len());
     }
 
     fn move_cursor(&mut self, delta: isize, visible_rows: usize) {
@@ -550,6 +585,7 @@ impl FileBrowserState {
             let p = self.active_panel_mut();
             p.tree_mode = false;
             p.tree_entries.clear();
+            p.backup_entries.clear();
             p.prev_dir_name = Some(dir_name);
             p.current_path = new_path;
             p.cursor = 0;
@@ -563,6 +599,7 @@ impl FileBrowserState {
             let panel = self.active_panel_mut();
             panel.tree_mode = false;
             panel.tree_entries.clear();
+            panel.backup_entries.clear();
             panel.current_path = PathBuf::from("/");
             panel.cursor = 0;
             panel.scroll_offset = 0;
@@ -575,6 +612,7 @@ impl FileBrowserState {
             let panel = self.active_panel_mut();
             panel.tree_mode = false;
             panel.tree_entries.clear();
+            panel.backup_entries.clear();
         }
         if self.active_side == Side::Remote {
             let home = if self.machine.username == "root" {
@@ -611,6 +649,7 @@ impl FileBrowserState {
                 let p = self.active_panel_mut();
                 p.tree_mode = false;
                 p.tree_entries.clear();
+                p.backup_entries.clear();
                 p.current_path = path;
                 p.cursor = 0;
                 p.scroll_offset = 0;
