@@ -503,6 +503,11 @@ impl FileBrowserState {
                 .into_iter().map(|mut te| { te.depth += 1; te }).collect()
         };
 
+        if children.is_empty() {
+            self.status = format!("{} (empty)", entry_clone.name);
+            return;
+        }
+
         let expanded_full_path = path.clone();
 
         let p = self.active_panel_mut();
