@@ -432,7 +432,9 @@ impl FileBrowserState {
 
     pub fn toggle_side(&mut self) {
         self.active_side = self.active_side.other();
-        let p = self.active_panel();
+        let p = self.active_panel_mut();
+        p.tree_mode = false;
+        p.tree_entries.clear();
         self.status = format!("{} entries", p.entries.len());
     }
 
