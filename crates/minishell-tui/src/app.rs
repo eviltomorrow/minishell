@@ -89,7 +89,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                 fb.check_pending();
             }
             terminal.draw(|f| {
-                if let Some(ref fb) = state.filebrowser {
+                if let Some(ref mut fb) = state.filebrowser {
                     fb.render(f);
                 }
             })?;

@@ -87,6 +87,7 @@ pub struct FileBrowserState {
     connecting_dots: u8,
     pending_connect: Option<mpsc::Receiver<Result<ssh2::Session, String>>>,
     connect_start: std::time::Instant,
+    visible_rows: usize,
 }
 
 const HEADER_FG: Color = Color::Cyan;
@@ -119,6 +120,7 @@ impl FileBrowserState {
             connecting_dots: 0,
             pending_connect: None,
             connect_start: std::time::Instant::now(),
+            visible_rows: 20,
         };
         let config = fb.build_config();
         let (tx, rx) = mpsc::channel();
@@ -349,7 +351,7 @@ impl FileBrowserState {
         self.status = format!("{} entries", p.entries.len());
     }
 
-    fn move_cursor(&mut self, delta: isize) {
+    fn move_cursor(&mut self, delta: isize, visible_rows: usize) {
         let panel = self.active_panel_mut();
         let len = panel.entries.len();
         if len == 0 {
@@ -359,6 +361,8 @@ impl FileBrowserState {
         panel.cursor = new;
         if new < panel.scroll_offset {
             panel.scroll_offset = new;
+        } else if new >= panel.scroll_offset + visible_rows {
+            panel.scroll_offset = new + 1 - visible_rows;
         }
     }
 
@@ -370,11 +374,14 @@ impl FileBrowserState {
         }
     }
 
-    fn cursor_last(&mut self) {
+    fn cursor_last(&mut self, visible_rows: usize) {
         let panel = self.active_panel_mut();
         let len = panel.entries.len();
         if len > 0 {
             panel.cursor = len - 1;
+            if panel.cursor >= panel.scroll_offset + visible_rows {
+                panel.scroll_offset = len.saturating_sub(visible_rows);
+            }
         }
     }
 
@@ -385,11 +392,14 @@ impl FileBrowserState {
                 return;
             }
             let entry = &p.entries[p.cursor];
-            if !entry.is_dir {
+            if entry.is_dir {
+                let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+                (p.current_path.join(&entry.name), dir_name)
+            } else {
+                let size_str = sftp::format_size(entry.size);
+                self.status = format!("{} ({})", entry.name, size_str);
                 return;
             }
-            let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
-            (p.current_path.join(&entry.name), dir_name)
         };
         {
             let p = self.active_panel_mut();
@@ -399,6 +409,36 @@ impl FileBrowserState {
             p.scroll_offset = 0;
         }
         self.refresh_panel(self.active_side);
+    }
+
+    fn goto_root(&mut self) {
+        let panel = self.active_panel_mut();
+        panel.current_path = PathBuf::from("/");
+        panel.cursor = 0;
+        panel.scroll_offset = 0;
+        self.refresh_panel(self.active_side);
+    }
+
+    fn goto_home(&mut self) {
+        if self.active_side == Side::Remote {
+            let home = if self.machine.username == "root" {
+                PathBuf::from("/root")
+            } else {
+                PathBuf::from(format!("/home/{}", self.machine.username))
+            };
+            let panel = self.active_panel_mut();
+            panel.current_path = home;
+            panel.cursor = 0;
+            panel.scroll_offset = 0;
+            self.refresh_remote();
+        } else {
+            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+            let panel = self.active_panel_mut();
+            panel.current_path = home;
+            panel.cursor = 0;
+            panel.scroll_offset = 0;
+            self.refresh_local();
+        }
     }
 
     fn parent_dir(&mut self) {
@@ -774,13 +814,15 @@ impl FileBrowserState {
         }
 
         match key.code {
-            KeyCode::Up => self.move_cursor(-1),
-            KeyCode::Down => self.move_cursor(1),
+            KeyCode::Up => self.move_cursor(-1, self.visible_rows),
+            KeyCode::Down => self.move_cursor(1, self.visible_rows),
             KeyCode::PageUp => self.cursor_first(),
-            KeyCode::PageDown => self.cursor_last(),
+            KeyCode::PageDown => self.cursor_last(self.visible_rows),
             KeyCode::Right | KeyCode::Enter => self.enter_dir(),
             KeyCode::Left | KeyCode::Esc => self.parent_dir(),
             KeyCode::Tab => self.toggle_side(),
+            KeyCode::Char('/') => self.goto_root(),
+            KeyCode::Char('~') => self.goto_home(),
             KeyCode::Char('u') => self.upload_selected(),
             KeyCode::Char('d') => self.download_selected(),
             KeyCode::Char('x') => self.start_delete(),
@@ -789,7 +831,7 @@ impl FileBrowserState {
         }
     }
 
-    pub fn render(&self, f: &mut Frame) {
+    pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
 
         let chunks = Layout::default()
@@ -832,6 +874,7 @@ impl FileBrowserState {
             .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .split(chunks[1]);
 
+        self.visible_rows = (chunks[1].height as usize).saturating_sub(4).max(1);
         self.render_panel(f, panels[0], Side::Local);
         self.render_panel(f, panels[1], Side::Remote);
 
@@ -1070,6 +1113,23 @@ impl FileBrowserState {
                 height: 1,
             },
         );
+
+        // Empty directory hint
+        if panel.entries.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "  (empty)",
+                    Style::default().fg(DIM),
+                ))),
+                Rect {
+                    x: inner.x,
+                    y: inner.y + 2,
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+            return;
+        }
 
         // File entries
         let visible = (inner.height.saturating_sub(2)) as usize;
