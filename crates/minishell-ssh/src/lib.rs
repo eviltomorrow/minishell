@@ -1,4 +1,5 @@
 pub mod card;
+pub mod sftp;
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
