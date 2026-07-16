@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use minishell_core::Machine;
-use minishell_ssh::sftp::{self, FileEntry, Sftp, format_modified, format_perm};
+use minishell_ssh::sftp::{self, FileEntry, format_modified, format_perm};
 use minishell_ssh::ConnectConfig;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -46,12 +46,8 @@ struct PanelState {
     scroll_offset: usize,
     current_path: PathBuf,
     prev_dir_name: Option<String>,
-    tree_mode: bool,
     tree_entries: Vec<TreeEntry>,
-    backup_entries: Vec<FileEntry>,
-    backup_cursor: usize,
-    backup_scroll_offset: usize,
-    expanded_path: Option<PathBuf>,
+    expanded_dirs: Vec<PathBuf>,
 }
 
 impl PanelState {
@@ -62,12 +58,8 @@ impl PanelState {
             scroll_offset: 0,
             current_path: path,
             prev_dir_name: None,
-            tree_mode: false,
             tree_entries: Vec::new(),
-            backup_entries: Vec::new(),
-            backup_cursor: 0,
-            backup_scroll_offset: 0,
-            expanded_path: None,
+            expanded_dirs: Vec::new(),
         }
     }
 }
@@ -322,6 +314,7 @@ impl FileBrowserState {
             .cursor
             .min(self.local.entries.len().saturating_sub(1));
         self.local.scroll_offset = 0;
+        Self::sync_tree(&mut self.local);
     }
 
     fn refresh_remote(&mut self) {
@@ -347,6 +340,7 @@ impl FileBrowserState {
                     .cursor
                     .min(self.remote.entries.len().saturating_sub(1));
                 self.remote.scroll_offset = 0;
+                Self::sync_tree(&mut self.remote);
                 self.status = format!("{} entries", self.remote.entries.len());
             }
             Err(e) => {
@@ -362,186 +356,211 @@ impl FileBrowserState {
         }
     }
 
-    fn build_tree_local(&self, path: &Path, max_depth: usize) -> Vec<TreeEntry> {
-        self.build_tree_local_recursive(path, max_depth, 0)
-    }
-
-    fn build_tree_local_recursive(&self, path: &Path, max_depth: usize, depth: usize) -> Vec<TreeEntry> {
-        let mut result = Vec::new();
-
-        let read_dir = match std::fs::read_dir(path) {
-            Ok(d) => d,
-            Err(_) => return result,
-        };
-
-        let mut entries: Vec<FileEntry> = Vec::new();
-        for entry in read_dir.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            let meta = entry.metadata().ok();
-            let modified = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| format_modified(Some(d.as_secs())))
-                .unwrap_or_default();
-            let perm = meta.as_ref().map(|m| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    format_perm(Some(m.permissions().mode() & 0o777), m.is_dir())
+    fn children_of_local(&self, path: &Path) -> Vec<FileEntry> {
+        let mut entries = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(path) {
+            for entry in read_dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
                 }
-                #[cfg(not(unix))]
-                { String::new() }
-            }).unwrap_or_default();
-            entries.push(FileEntry {
-                name,
-                is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
-                size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-                modified,
-                perm,
-            });
+                let meta = entry.metadata().ok();
+                let modified = meta.as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| format_modified(Some(d.as_secs())))
+                    .unwrap_or_default();
+                let perm = meta.as_ref().map(|m| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        format_perm(Some(m.permissions().mode() & 0o777), m.is_dir())
+                    }
+                    #[cfg(not(unix))]
+                    { String::new() }
+                }).unwrap_or_default();
+                entries.push(FileEntry {
+                    name,
+                    is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                    size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                    modified,
+                    perm,
+                });
+            }
         }
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
-
-        for entry in entries {
-            result.push(TreeEntry { entry: entry.clone(), depth });
-            if entry.is_dir && depth < max_depth {
-                let child_path = path.join(&entry.name);
-                result.append(&mut self.build_tree_local_recursive(&child_path, max_depth, depth + 1));
-            }
-        }
-        result
+        entries
     }
 
-    fn build_tree_remote(&self, sftp: &Sftp, path: &str, max_depth: usize) -> Vec<TreeEntry> {
-        self.build_tree_remote_recursive(sftp, path, max_depth, 0)
-    }
-
-    fn build_tree_remote_recursive(&self, sftp: &Sftp, path: &str, max_depth: usize, depth: usize) -> Vec<TreeEntry> {
-        let mut result = Vec::new();
-
-        let entries = match sftp::list_dir(sftp, path) {
-            Ok(e) => e,
-            Err(_) => return result,
+    fn children_of_remote(&self, path: &str) -> Vec<FileEntry> {
+        let session = match self.session.as_ref() {
+            Some(s) => s,
+            None => return Vec::new(),
         };
+        let sftp = match session.sftp() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        sftp::list_dir(&sftp, path).unwrap_or_default()
+    }
 
-        for entry in entries {
-            result.push(TreeEntry { entry: entry.clone(), depth });
-            if entry.is_dir && depth < max_depth {
-                let child_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
-                result.append(&mut self.build_tree_remote_recursive(sftp, &child_path, max_depth, depth + 1));
+    fn rebuild_panel_tree(&mut self, side: Side) {
+        let entries;
+        let expanded_dirs;
+        let current_path;
+        match side {
+            Side::Local => {
+                entries = self.local.entries.clone();
+                expanded_dirs = self.local.expanded_dirs.clone();
+                current_path = self.local.current_path.clone();
+            }
+            Side::Remote => {
+                entries = self.remote.entries.clone();
+                expanded_dirs = self.remote.expanded_dirs.clone();
+                current_path = self.remote.current_path.clone();
             }
         }
-        result
+
+        let mut new_entries: Vec<TreeEntry> = Vec::new();
+        for entry in &entries {
+            new_entries.push(TreeEntry { entry: entry.clone(), depth: 0 });
+            if !entry.is_dir { continue; }
+            let dir_path = current_path.join(&entry.name);
+            if !expanded_dirs.contains(&dir_path) { continue; }
+
+            let children = if side == Side::Remote {
+                self.children_of_remote(&dir_path.to_string_lossy())
+            } else {
+                self.children_of_local(&dir_path)
+            };
+
+            for child in &children {
+                let child_name = child.name.clone();
+                let child_is_dir = child.is_dir;
+                new_entries.push(TreeEntry { entry: child.clone(), depth: 1 });
+                if child_is_dir {
+                    let child_path = dir_path.join(&child_name);
+                    if expanded_dirs.contains(&child_path) {
+                        let grandchildren = if side == Side::Remote {
+                            self.children_of_remote(&child_path.to_string_lossy())
+                        } else {
+                            self.children_of_local(&child_path)
+                        };
+                        for g in &grandchildren {
+                            new_entries.push(TreeEntry { entry: g.clone(), depth: 2 });
+                        }
+                    }
+                }
+            }
+        }
+
+        match side {
+            Side::Local => {
+                self.local.tree_entries = new_entries;
+                self.local.cursor = self.local.cursor.min(self.local.tree_entries.len().saturating_sub(1));
+            }
+            Side::Remote => {
+                self.remote.tree_entries = new_entries;
+                self.remote.cursor = self.remote.cursor.min(self.remote.tree_entries.len().saturating_sub(1));
+            }
+        }
+    }
+
+    fn sync_tree(panel: &mut PanelState) {
+        panel.tree_entries = panel.entries.iter()
+            .map(|e| TreeEntry { entry: e.clone(), depth: 0 })
+            .collect();
     }
 
     pub fn toggle_side(&mut self) {
         self.active_side = self.active_side.other();
-        let p = self.active_panel_mut();
-        p.tree_mode = false;
-        p.tree_entries.clear();
-        p.backup_entries.clear();
-        p.expanded_path = None;
+        let p = self.active_panel();
         self.status = format!("{} entries", p.entries.len());
     }
 
     pub fn toggle_tree(&mut self) {
-        if self.active_panel().tree_mode {
-            let p = self.active_panel_mut();
-            p.tree_mode = false;
-            p.tree_entries.clear();
-            p.expanded_path = None;
-            p.entries = p.backup_entries.split_off(0);
-            p.cursor = p.backup_cursor;
-            p.scroll_offset = p.backup_scroll_offset;
-            self.status = format!("{} entries", p.entries.len());
-            return;
-        }
-
         if self.active_side == Side::Remote && self.session.is_none() {
             self.status = "Not connected".to_string();
             return;
         }
 
-        let (cursor, path, entry_clone, entries_before, entries_after, is_remote) = {
+        let (full_path, is_dir, side) = {
             let p = self.active_panel();
-            if p.entries.is_empty() {
+            if p.tree_entries.is_empty() {
                 return;
             }
-            let entry = &p.entries[p.cursor];
-            if !entry.is_dir {
+            let entry = &p.tree_entries[p.cursor];
+            if !entry.entry.is_dir {
                 return;
             }
-            let cursor = p.cursor;
-            let path = p.current_path.join(&entry.name);
-            let entry_clone = entry.clone();
-            let entries_before = p.entries[..cursor].to_vec();
-            let entries_after = p.entries[cursor + 1..].to_vec();
-            (cursor, path, entry_clone, entries_before, entries_after, self.active_side == Side::Remote)
-        };
-
-        let children: Vec<TreeEntry> = if is_remote {
-            let session = match self.session.as_ref() {
-                Some(s) => s,
-                None => return,
-            };
-            let sftp = match session.sftp() {
-                Ok(s) => s,
-                Err(e) => {
-                    self.status = format!("SFTP error: {}", e);
-                    return;
+            let depth = entry.depth;
+            let path = if depth == 0 {
+                p.current_path.join(&entry.entry.name)
+            } else {
+                let mut path = p.current_path.clone();
+                let mut need = depth;
+                for i in (0..p.cursor).rev() {
+                    let prev = &p.tree_entries[i];
+                    if prev.depth == need - 1 {
+                        path = path.join(&prev.entry.name);
+                        need = prev.depth;
+                        if need == 0 {
+                            break;
+                        }
+                    }
                 }
+                path.join(&entry.entry.name)
             };
-            let path_str = path.to_string_lossy().to_string();
-            self.build_tree_remote(&sftp, &path_str, 1)
-                .into_iter().map(|mut te| { te.depth += 1; te }).collect()
-        } else {
-            self.build_tree_local(&path, 1)
-                .into_iter().map(|mut te| { te.depth += 1; te }).collect()
+            (path, entry.entry.is_dir, self.active_side)
         };
 
-        if children.is_empty() {
-            self.status = format!("{} (empty)", entry_clone.name);
+        if !is_dir {
             return;
         }
 
-        let expanded_full_path = path.clone();
+        let was_expanded = match side {
+            Side::Local => self.local.expanded_dirs.contains(&full_path),
+            Side::Remote => self.remote.expanded_dirs.contains(&full_path),
+        };
 
-        let p = self.active_panel_mut();
-        p.backup_entries = p.entries.clone();
-        p.backup_cursor = cursor;
-        p.backup_scroll_offset = p.scroll_offset;
-        p.expanded_path = Some(expanded_full_path);
-
-        let mut new_entries: Vec<TreeEntry> = Vec::with_capacity(
-            entries_before.len() + 1 + children.len() + entries_after.len()
-        );
-        for e in &entries_before {
-            new_entries.push(TreeEntry { entry: e.clone(), depth: 0 });
+        if was_expanded {
+            match side {
+                Side::Local => self.local.expanded_dirs.retain(|p| p != &full_path),
+                Side::Remote => self.remote.expanded_dirs.retain(|p| p != &full_path),
+            }
+            self.rebuild_panel_tree(side);
+            let count = match side {
+                Side::Local => self.local.tree_entries.len(),
+                Side::Remote => self.remote.tree_entries.len(),
+            };
+            self.status = format!("{} entries", count);
+        } else {
+            let children = if side == Side::Remote {
+                self.children_of_remote(&full_path.to_string_lossy())
+            } else {
+                self.children_of_local(&full_path)
+            };
+            if children.is_empty() {
+                self.status = format!("{} (empty)",
+                    full_path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default());
+                return;
+            }
+            match side {
+                Side::Local => self.local.expanded_dirs.push(full_path),
+                Side::Remote => self.remote.expanded_dirs.push(full_path),
+            }
+            self.rebuild_panel_tree(side);
+            let count = match side {
+                Side::Local => self.local.tree_entries.len(),
+                Side::Remote => self.remote.tree_entries.len(),
+            };
+            self.status = format!("{} entries", count);
         }
-        new_entries.push(TreeEntry { entry: entry_clone, depth: 0 });
-        new_entries.extend(children);
-        for e in &entries_after {
-            new_entries.push(TreeEntry { entry: e.clone(), depth: 0 });
-        }
-
-        p.tree_entries = new_entries;
-        p.tree_mode = true;
-        p.cursor = cursor;
-        p.scroll_offset = 0;
-        self.status = format!("{} entries (tree)", p.tree_entries.len());
     }
 
     fn move_cursor(&mut self, delta: isize, visible_rows: usize) {
         let panel = self.active_panel_mut();
-        let len = if panel.tree_mode {
-            panel.tree_entries.len()
-        } else {
-            panel.entries.len()
-        };
+        let len = panel.tree_entries.len();
         if len == 0 {
             return;
         }
@@ -556,8 +575,7 @@ impl FileBrowserState {
 
     fn cursor_first(&mut self) {
         let panel = self.active_panel_mut();
-        let len = if panel.tree_mode { panel.tree_entries.len() } else { panel.entries.len() };
-        if len > 0 {
+        if !panel.tree_entries.is_empty() {
             panel.cursor = 0;
             panel.scroll_offset = 0;
         }
@@ -565,7 +583,7 @@ impl FileBrowserState {
 
     fn cursor_last(&mut self, visible_rows: usize) {
         let panel = self.active_panel_mut();
-        let len = if panel.tree_mode { panel.tree_entries.len() } else { panel.entries.len() };
+        let len = panel.tree_entries.len();
         if len > 0 {
             panel.cursor = len - 1;
             if panel.cursor >= panel.scroll_offset + visible_rows {
@@ -577,56 +595,39 @@ impl FileBrowserState {
     fn enter_dir(&mut self) {
         let (new_path, dir_name) = {
             let p = self.active_panel();
-            let len = if p.tree_mode { p.tree_entries.len() } else { p.entries.len() };
-            if len == 0 {
+            if p.tree_entries.is_empty() {
                 return;
             }
-            let entry = if p.tree_mode {
-                &p.tree_entries[p.cursor].entry
-            } else {
-                &p.entries[p.cursor]
-            };
-            if entry.is_dir {
-                let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
-                let new_path = if p.tree_mode {
-                    let expanded = match p.expanded_path.as_ref() {
-                        Some(e) => e.clone(),
-                        None => p.current_path.join(&entry.name),
-                    };
-                    let depth = p.tree_entries[p.cursor].depth;
-                    if depth == 0 {
-                        expanded
-                    } else {
-                        let mut path = expanded;
-                        let mut need = depth;
-                        for i in (0..p.cursor).rev() {
-                            let prev = &p.tree_entries[i];
-                            if prev.depth >= 1 && prev.depth == need - 1 {
-                                path = path.join(&prev.entry.name);
-                                need = prev.depth;
-                                if need == 1 {
-                                    break;
-                                }
-                            }
-                        }
-                        path.join(&entry.name)
-                    }
-                } else {
-                    p.current_path.join(&entry.name)
-                };
-                (new_path, dir_name)
-            } else {
+            let entry = &p.tree_entries[p.cursor].entry;
+            if !entry.is_dir {
                 let size_str = sftp::format_size(entry.size);
                 self.status = format!("{} ({})", entry.name, size_str);
                 return;
             }
+            let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+            let depth = p.tree_entries[p.cursor].depth;
+            let new_path = if depth == 0 {
+                p.current_path.join(&entry.name)
+            } else {
+                let mut path = p.current_path.clone();
+                let mut need = depth;
+                for i in (0..p.cursor).rev() {
+                    let prev = &p.tree_entries[i];
+                    if prev.depth == need - 1 {
+                        path = path.join(&prev.entry.name);
+                        need = prev.depth;
+                        if need == 0 {
+                            break;
+                        }
+                    }
+                }
+                path.join(&entry.name)
+            };
+            (new_path, dir_name)
         };
         {
             let p = self.active_panel_mut();
-            p.tree_mode = false;
-            p.tree_entries.clear();
-            p.backup_entries.clear();
-            p.expanded_path = None;
+            p.expanded_dirs.clear();
             p.prev_dir_name = Some(dir_name);
             p.current_path = new_path;
             p.cursor = 0;
@@ -638,10 +639,7 @@ impl FileBrowserState {
     fn goto_root(&mut self) {
         {
             let panel = self.active_panel_mut();
-            panel.tree_mode = false;
-            panel.tree_entries.clear();
-            panel.backup_entries.clear();
-            panel.expanded_path = None;
+            panel.expanded_dirs.clear();
             panel.current_path = PathBuf::from("/");
             panel.cursor = 0;
             panel.scroll_offset = 0;
@@ -652,10 +650,7 @@ impl FileBrowserState {
     fn goto_home(&mut self) {
         {
             let panel = self.active_panel_mut();
-            panel.tree_mode = false;
-            panel.tree_entries.clear();
-            panel.backup_entries.clear();
-            panel.expanded_path = None;
+            panel.expanded_dirs.clear();
         }
         if self.active_side == Side::Remote {
             let home = if self.machine.username == "root" {
@@ -690,10 +685,7 @@ impl FileBrowserState {
         if let Some(path) = parent {
             {
                 let p = self.active_panel_mut();
-                p.tree_mode = false;
-                p.tree_entries.clear();
-                p.backup_entries.clear();
-                p.expanded_path = None;
+                p.expanded_dirs.clear();
                 p.current_path = path;
                 p.cursor = 0;
                 p.scroll_offset = 0;
@@ -1054,7 +1046,7 @@ impl FileBrowserState {
             return;
         }
 
-        if self.active_panel().tree_mode {
+        if !self.active_panel().expanded_dirs.is_empty() {
             match key.code {
                 KeyCode::Char('u') | KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Char('r') => {
                     return;
@@ -1220,7 +1212,7 @@ impl FileBrowserState {
                 ]
             } else if self.pending.is_some() {
                 vec![Span::styled("(transferring...)", styles::help_style())]
-            } else if self.active_panel().tree_mode {
+            } else if !self.active_panel().expanded_dirs.is_empty() {
                 vec![
                     Span::styled("Tab", styles::key_style()),
                     Span::styled(":panel  ", styles::help_style()),
@@ -1383,12 +1375,7 @@ impl FileBrowserState {
         );
 
         // Empty directory hint
-        let entry_count = if panel.tree_mode {
-            panel.tree_entries.len()
-        } else {
-            panel.entries.len()
-        };
-        if entry_count == 0 {
+        if panel.tree_entries.is_empty() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "  (empty)",
@@ -1426,15 +1413,12 @@ impl FileBrowserState {
 
         for i in 0..visible {
             let idx = panel.scroll_offset + i;
-            if idx >= entry_count {
+            if idx >= panel.tree_entries.len() {
                 break;
             }
-            let (entry, display_depth) = if panel.tree_mode {
-                let te = &panel.tree_entries[idx];
-                (&te.entry, te.depth)
-            } else {
-                (&panel.entries[idx], 0)
-            };
+            let te = &panel.tree_entries[idx];
+            let entry = &te.entry;
+            let display_depth = te.depth;
             let is_selected = idx == panel.cursor;
             let style = if is_selected {
                 selected_style
