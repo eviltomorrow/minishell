@@ -943,14 +943,9 @@ impl FileBrowserState {
             Side::Remote => "Remote",
         };
         let type_label = if entry.is_dir { "[DIR]" } else { "[FILE]" };
-        let size_label = if entry.is_dir {
-            String::new()
-        } else {
-            format!(" ({})", sftp::format_size(entry.size))
-        };
         self.status = format!(
-            "Delete {} {}?  {}:{}{}",
-            type_label, entry.name, side_label, full_path.display(), size_label
+            "Delete|{}|{}|{}|{}",
+            type_label, entry.name, side_label, full_path.display()
         );
         self.confirm_delete = Some((side, cursor));
     }
@@ -1269,22 +1264,31 @@ impl FileBrowserState {
                 spans.push(Span::styled("\u{2591}".repeat(empty), Style::default().fg(Color::DarkGray)));
                 spans.push(Span::styled(format!(" {}%", pct), Style::default().fg(Color::Yellow)));
             } else if self.confirm_delete.is_some() {
-                if status_text.contains("[DIR]") {
-                    spans.push(Span::styled("Delete [DIR]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
-                    if let Some(pos) = status_text.find("?") {
-                        let name = &status_text[12..pos];
-                        let rest = &status_text[pos..];
-                        spans.push(Span::styled(format!(" {}?", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
-                        spans.push(Span::styled(rest, Style::default().fg(Color::DarkGray)));
-                    }
+                // Format: "Delete|[DIR]|name|Local|/full/path"
+                let parts: Vec<&str> = status_text.split('|').collect();
+                if parts.len() >= 5 {
+                    spans.push(Span::styled(
+                        format!("{} ", parts[0]),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        parts[1],
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        format!(" {} ", parts[2]),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        format!("({})", parts[3]),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    spans.push(Span::styled(
+                        format!(" {}?", parts[4]),
+                        Style::default().fg(Color::Cyan),
+                    ));
                 } else {
-                    spans.push(Span::styled("Delete [FILE]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
-                    if let Some(pos) = status_text.find("?") {
-                        let name = &status_text[13..pos];
-                        let rest = &status_text[pos..];
-                        spans.push(Span::styled(format!(" {}?", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
-                        spans.push(Span::styled(rest, Style::default().fg(Color::DarkGray)));
-                    }
+                    spans.push(Span::styled(&status_text, Style::default().fg(Color::Red)));
                 }
             } else if self.transfer_confirm.is_some() {
                 // Format: "Upload|[DIR]|name|/src/path|->|/dst/path"
