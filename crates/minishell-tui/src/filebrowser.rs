@@ -1585,58 +1585,44 @@ impl FileBrowserState {
 
         f.render_widget(Clear, area);
 
-        if area.height < 1 || area.width < 3 {
+        if area.height < 5 || area.width < 3 {
             return;
         }
 
         let mid_y = area.y + area.height / 2;
 
-        if self.pending.is_some() {
-            // Transfer in progress: thin yellow line + arrow
-            for x in 0..area.width {
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        "\u{2500}",
-                        Style::default().fg(Color::Yellow),
-                    ))),
-                    Rect { x: area.x + x, y: mid_y, width: 1, height: 1 },
-                );
+        let (color, top, mid, bot) = if self.pending.is_some() {
+            match self.active_side {
+                Side::Local => (Color::Yellow, " \u{2584} ", "\u{2501}\u{2501}\u{25B6}", " \u{2580} "),
+                Side::Remote => (Color::Yellow, " \u{2584} ", "\u{25C0}\u{2501}\u{2501}", " \u{2580} "),
             }
-            let symbol = match self.active_side {
-                Side::Local => "\u{25B6}",
-                Side::Remote => "\u{25C0}",
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    symbol,
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ))),
-                Rect { x: area.x + 1, y: mid_y, width: 1, height: 1 },
-            );
         } else if self.transfer_confirm.is_some() {
-            // Awaiting confirm: thin green line + arrow
-            for x in 0..area.width {
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        "\u{2500}",
-                        Style::default().fg(Color::Green),
-                    ))),
-                    Rect { x: area.x + x, y: mid_y, width: 1, height: 1 },
-                );
+            match self.transfer_confirm.unwrap() {
+                Side::Local => (Color::Green, " \u{2584} ", "\u{2501}\u{2501}\u{25B6}", " \u{2580} "),
+                Side::Remote => (Color::Green, " \u{2584} ", "\u{25C0}\u{2501}\u{2501}", " \u{2580} "),
             }
-            let symbol = match self.transfer_confirm.unwrap() {
-                Side::Local => "\u{25B6}",
-                Side::Remote => "\u{25C0}",
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    symbol,
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ))),
-                Rect { x: area.x + 1, y: mid_y, width: 1, height: 1 },
-            );
-        }
-        // Idle: empty (already cleared)
+        } else {
+            return;
+        };
+
+        // Top: ▄
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(top, Style::default().fg(color)))),
+            Rect { x: area.x, y: mid_y - 1, width: area.width, height: 1 },
+        );
+        // Middle: ━━▶ or ◀━━
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                mid,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))),
+            Rect { x: area.x, y: mid_y, width: area.width, height: 1 },
+        );
+        // Bottom: ▀
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(bot, Style::default().fg(color)))),
+            Rect { x: area.x, y: mid_y + 1, width: area.width, height: 1 },
+        );
     }
 }
 
