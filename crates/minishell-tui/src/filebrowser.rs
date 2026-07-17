@@ -1583,37 +1583,54 @@ impl FileBrowserState {
     fn render_arrow(&self, f: &mut Frame, area: Rect) {
         use ratatui::widgets::Clear;
 
-        f.render_widget(Clear, area);
-
         if area.height < 1 || area.width < 3 {
+            f.render_widget(Clear, area);
             return;
         }
 
-        let (symbol, color) = if self.pending.is_some() {
+        let (symbol, fg, bg) = if self.pending.is_some() {
             match self.active_side {
-                Side::Local => ("\u{2192}", Color::Yellow),
-                Side::Remote => ("\u{2190}", Color::Yellow),
+                Side::Local => ("\u{25B6}", Color::Black, Color::Yellow),
+                Side::Remote => ("\u{25C0}", Color::Black, Color::Yellow),
             }
         } else if self.transfer_confirm.is_some() {
             match self.transfer_confirm.unwrap() {
-                Side::Local => ("\u{2192}", Color::Green),
-                Side::Remote => ("\u{2190}", Color::Green),
+                Side::Local => ("\u{25B6}", Color::White, Color::Green),
+                Side::Remote => ("\u{25C0}", Color::White, Color::Green),
             }
         } else {
-            ("\u{00B7}", Color::DarkGray)
+            ("\u{2502}", Color::DarkGray, Color::Reset)
         };
 
+        // Full-height colored background band
+        for row in 0..area.height {
+            let line = Line::from(Span::styled(
+                " \u{2502} ",
+                Style::default().fg(Color::DarkGray).bg(bg),
+            ));
+            f.render_widget(
+                Paragraph::new(line),
+                Rect {
+                    x: area.x,
+                    y: area.y + row,
+                    width: area.width,
+                    height: 1,
+                },
+            );
+        }
+
+        // Overlay arrow at vertical center
         let y = area.y + area.height / 2;
-        let x = area.x + 1;
+        let arrow_line = Line::from(Span::styled(
+            symbol,
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        ));
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                symbol,
-                Style::default().fg(color),
-            ))),
+            Paragraph::new(arrow_line),
             Rect {
-                x,
+                x: area.x,
                 y,
-                width: 1,
+                width: area.width,
                 height: 1,
             },
         );
