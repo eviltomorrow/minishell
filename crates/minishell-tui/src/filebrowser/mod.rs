@@ -18,7 +18,7 @@ pub mod panel;
 pub mod transfer;
 pub mod render;
 
-pub use types::{Side, TreeEntry};
+pub use types::{Side, TreeEntry, ClipboardEntry};
 pub use panel::PanelState;
 pub use transfer::{TransferProgressState, ActionResult, PendingTransfer};
 pub use render::{HEADER_FG, ACTIVE_BORDER, INACTIVE_BORDER, DIR_FG, FILE_FG, SELECTED_BG, STATUS_OK, STATUS_ERR, DIM, HINT, render_name_and_path};
@@ -40,6 +40,12 @@ pub struct FileBrowserState {
     rename_input: Option<String>,
     old_entry_name: String,
     old_entry_path: std::path::PathBuf,
+    clipboard: Vec<ClipboardEntry>,
+    clipboard_side: Option<Side>,
+    clipboard_panel_open: bool,
+    clipboard_panel_cursor: usize,
+    switch_confirm: Option<Side>,
+    transfer_queue: Vec<ClipboardEntry>,
     connecting_dots: u8,
     pending_connect: Option<mpsc::Receiver<Result<ssh2::Session, String>>>,
     connect_start: std::time::Instant,
@@ -65,6 +71,12 @@ impl FileBrowserState {
             rename_input: None,
             old_entry_name: String::new(),
             old_entry_path: std::path::PathBuf::new(),
+            clipboard: Vec::new(),
+            clipboard_side: None,
+            clipboard_panel_open: false,
+            clipboard_panel_cursor: 0,
+            switch_confirm: None,
+            transfer_queue: Vec::new(),
             connecting_dots: 0,
             pending_connect: None,
             connect_start: std::time::Instant::now(),
@@ -202,12 +214,27 @@ impl FileBrowserState {
         match transfer.done_rx.try_recv() {
             Ok(ActionResult::TransferDone(side)) => {
                 self.clear_transfer();
-                self.status = "Transfer complete".to_string();
                 self.refresh_panel(side);
+                if self.transfer_queue.is_empty() {
+                    self.status = "Transfer complete".to_string();
+                } else {
+                    self.transfer_queue.remove(0);
+                    if self.transfer_queue.is_empty() {
+                        self.status = "Transfer complete".to_string();
+                    } else {
+                        self.process_next_transfer();
+                    }
+                }
             }
             Ok(ActionResult::Error(e)) => {
                 self.clear_transfer();
                 self.status = format!("Error: {}", e);
+                if !self.transfer_queue.is_empty() {
+                    self.transfer_queue.remove(0);
+                    if !self.transfer_queue.is_empty() {
+                        self.process_next_transfer();
+                    }
+                }
             }
             Err(TryRecvError::Empty) => {
                 if self.progress_total > 0 {
@@ -506,6 +533,281 @@ impl FileBrowserState {
                 None => return p.current_path.clone(),
             };
             p.current_path.join(&entry.name)
+        }
+    }
+
+    fn is_effectively_selected(&self, entry_name: &str, side: Side, cursor: usize) -> bool {
+        if self.clipboard.iter().any(|c| c.name == entry_name && c.source_side == side) {
+            return true;
+        }
+        let p = match side {
+            Side::Local => &self.local,
+            Side::Remote => &self.remote,
+        };
+        if p.expanded_dirs.is_empty() || cursor >= p.tree_entries.len() {
+            return false;
+        }
+        let mut depth = p.tree_entries[cursor].depth;
+        if depth == 0 {
+            return false;
+        }
+        for i in (0..cursor).rev() {
+            if p.tree_entries[i].depth < depth {
+                let parent_name = &p.tree_entries[i].entry.name;
+                if self.clipboard.iter().any(|c| c.name == *parent_name && c.source_side == side) {
+                    return true;
+                }
+                if p.tree_entries[i].depth == 0 {
+                    break;
+                }
+                depth = p.tree_entries[i].depth;
+            }
+        }
+        false
+    }
+
+    fn yank_toggle(&mut self) {
+        let entry = match self.current_entry() {
+            Some(e) => e,
+            None => return,
+        };
+        if entry.name == ".." {
+            return;
+        }
+        let full_path = self.current_entry_full_path();
+        let side = self.active_side;
+        let cursor = self.active_panel().cursor;
+
+        // Directly in clipboard → remove
+        if let Some(pos) = self.clipboard.iter().position(|c| c.source_path == full_path) {
+            self.clipboard.remove(pos);
+            if self.clipboard.is_empty() {
+                self.clipboard_side = None;
+            }
+            self.status = format!("Unmarked: {}", entry.name);
+            return;
+        }
+
+        // Selected via parent → deselect parent
+        if self.is_effectively_selected(&entry.name, side, cursor) {
+            let p = self.active_panel();
+            let mut depth = p.tree_entries[cursor].depth;
+            for i in (0..cursor).rev() {
+                if p.tree_entries[i].depth < depth {
+                    let parent_name = p.tree_entries[i].entry.name.clone();
+                    if let Some(pos) = self.clipboard.iter().position(|c| c.name == parent_name && c.source_side == side) {
+                        self.clipboard.remove(pos);
+                        if self.clipboard.is_empty() {
+                            self.clipboard_side = None;
+                        }
+                        self.status = format!("Unmarked: {}", parent_name);
+                        return;
+                    }
+                    if p.tree_entries[i].depth == 0 {
+                        break;
+                    }
+                    depth = p.tree_entries[i].depth;
+                }
+            }
+            return;
+        }
+
+        // Cross-side check
+        if let Some(clip_side) = self.clipboard_side {
+            if clip_side != side {
+                self.switch_confirm = Some(side);
+                self.status = format!(
+                    "Switch to {}? Clear selection [Y/N]",
+                    side.label()
+                );
+                return;
+            }
+        }
+
+        // Add to clipboard
+        if self.clipboard_side.is_none() {
+            self.clipboard_side = Some(side);
+        }
+        self.clipboard.push(ClipboardEntry {
+            source_path: full_path,
+            source_side: side,
+            name: entry.name.clone(),
+            is_dir: entry.is_dir,
+        });
+        self.status = format!("✓ Copied: {} ({})", entry.name, side.label());
+    }
+
+    fn confirm_switch(&mut self) {
+        let side = match self.switch_confirm.take() {
+            Some(s) => s,
+            None => return,
+        };
+        let entry = match self.current_entry() {
+            Some(e) => e,
+            None => return,
+        };
+        let full_path = self.current_entry_full_path();
+        self.clipboard.clear();
+        self.clipboard_side = Some(side);
+        self.clipboard.push(ClipboardEntry {
+            source_path: full_path,
+            source_side: side,
+            name: entry.name.clone(),
+            is_dir: entry.is_dir,
+        });
+        self.status = format!("✓ Copied: {} ({})", entry.name, side.label());
+    }
+
+    fn open_clipboard_panel(&mut self) {
+        if self.clipboard.is_empty() {
+            self.status = "No files selected".to_string();
+            return;
+        }
+        self.clipboard_panel_open = true;
+        self.clipboard_panel_cursor = 0;
+    }
+
+    fn close_clipboard_panel(&mut self) {
+        self.clipboard_panel_open = false;
+    }
+
+    fn clipboard_panel_next(&mut self) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+        self.clipboard_panel_cursor = (self.clipboard_panel_cursor + 1) % self.clipboard.len();
+    }
+
+    fn clipboard_panel_remove(&mut self) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+        self.clipboard.remove(self.clipboard_panel_cursor);
+        if self.clipboard.is_empty() {
+            self.clipboard_side = None;
+            self.clipboard_panel_open = false;
+            self.status = "Selection cleared".to_string();
+            return;
+        }
+        if self.clipboard_panel_cursor >= self.clipboard.len() {
+            self.clipboard_panel_cursor = self.clipboard.len() - 1;
+        }
+    }
+
+    fn paste_from_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            self.status = "No files selected".to_string();
+            return;
+        }
+        if self.pending.is_some() {
+            return;
+        }
+        let clip_side = match self.clipboard_side {
+            Some(s) => s,
+            None => return,
+        };
+        if clip_side == self.active_side {
+            return;
+        }
+        if clip_side == Side::Remote && self.session.is_none() {
+            self.status = "Not connected".to_string();
+            return;
+        }
+
+        self.transfer_queue = self.clipboard.drain(..).collect();
+        self.clipboard_side = None;
+        self.clipboard_panel_open = false;
+        self.process_next_transfer();
+    }
+
+    fn process_next_transfer(&mut self) {
+        let entry = match self.transfer_queue.first() {
+            Some(e) => e.clone(),
+            None => {
+                self.status = "Transfer complete".to_string();
+                return;
+            }
+        };
+
+        let source_path = entry.source_path.clone();
+        let source_side = entry.source_side;
+        let name = entry.name.clone();
+        let is_dir = entry.is_dir;
+
+        let dest_path = self.active_panel().current_path.join(&name);
+        let dest_str = dest_path.to_string_lossy().to_string();
+        let src_str = source_path.to_string_lossy().to_string();
+
+        let (tx, progress) = self.init_transfer(name.clone());
+
+        match source_side {
+            Side::Local => {
+                if is_dir {
+                    self.status = format!("Uploading {}/...", name);
+                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                        let cb = |p: &sftp::TransferProgress| {
+                            let mut state = progress.lock().unwrap();
+                            state.file_name = p.file_name.clone();
+                            state.bytes = p.bytes_written;
+                            state.total = p.total_bytes;
+                        };
+                        let errors = sftp::upload_recursive(&sftp, &source_path, &dest_str, &cb);
+                        match errors {
+                            Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
+                            Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
+                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
+                        }
+                    });
+                } else {
+                    let total_size = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
+                    self.status = format!("Uploading {}...", name);
+                    self.progress_total = total_size;
+                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                        let cb = |cur: u64, total: u64| {
+                            let mut state = progress.lock().unwrap();
+                            state.bytes = cur;
+                            state.total = total;
+                        };
+                        match sftp::upload_file(&sftp, &source_path, &dest_str, &cb) {
+                            Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
+                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
+                        }
+                    });
+                }
+            }
+            Side::Remote => {
+                if is_dir {
+                    self.status = format!("Downloading {}/...", name);
+                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                        let _ = std::fs::create_dir_all(&dest_path);
+                        let cb = |p: &sftp::TransferProgress| {
+                            let mut state = progress.lock().unwrap();
+                            state.file_name = p.file_name.clone();
+                            state.bytes = p.bytes_written;
+                            state.total = p.total_bytes;
+                        };
+                        let errors = sftp::download_recursive(&sftp, &src_str, &dest_path, &cb);
+                        match errors {
+                            Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
+                            Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
+                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
+                        }
+                    });
+                } else {
+                    self.status = format!("Downloading {}...", name);
+                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                        let cb = |cur: u64, total: u64| {
+                            let mut state = progress.lock().unwrap();
+                            state.bytes = cur;
+                            state.total = total;
+                        };
+                        match sftp::download_file(&sftp, &src_str, &dest_path, &cb) {
+                            Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
+                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -1194,6 +1496,41 @@ impl FileBrowserState {
             return;
         }
 
+        if self.switch_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_switch(),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.switch_confirm = None;
+                    self.status = "Selection unchanged".to_string();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.clipboard_panel_open {
+            match key.code {
+                KeyCode::Char('n') => {
+                    self.clipboard_panel_next();
+                    return;
+                }
+                KeyCode::Char('k') => {
+                    self.clipboard_panel_remove();
+                    return;
+                }
+                KeyCode::Char('v') | KeyCode::Esc => {
+                    self.close_clipboard_panel();
+                    return;
+                }
+                KeyCode::Char('p') => {
+                    self.close_clipboard_panel();
+                    self.paste_from_clipboard();
+                    return;
+                }
+                _ => {} // fall through to normal handler
+            }
+        }
+
         if self.pending.is_some() {
             return;
         }
@@ -1213,6 +1550,9 @@ impl FileBrowserState {
             KeyCode::Char('d') => self.start_delete(),
             KeyCode::Char('r') => self.start_rename(),
             KeyCode::Char('t') => self.toggle_tree(),
+            KeyCode::Char('y') => self.yank_toggle(),
+            KeyCode::Char('v') => self.open_clipboard_panel(),
+            KeyCode::Char('p') => self.paste_from_clipboard(),
             _ => {}
         }
     }
@@ -1269,6 +1609,15 @@ impl FileBrowserState {
         self.visible_rows = (chunks[1].height as usize).saturating_sub(4).max(1);
         self.render_panel(f, panels[0], Side::Local);
         self.render_panel(f, panels[1], Side::Remote);
+
+        // Clipboard panel overlay
+        if self.clipboard_panel_open {
+            let panel_area = match self.clipboard_side.unwrap_or(self.active_side) {
+                Side::Local => panels[0],
+                Side::Remote => panels[1],
+            };
+            self.render_clipboard_panel(f, panel_area);
+        }
 
         // Status + Help bar
         {
@@ -1375,6 +1724,8 @@ impl FileBrowserState {
                 } else {
                     spans.push(Span::styled(&status_text, Style::default().fg(Color::Yellow)));
                 }
+            } else if self.switch_confirm.is_some() {
+                spans.push(Span::styled(&status_text, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
             } else {
                 spans.push(Span::styled(&status_text, Style::default().fg(status_color)));
             }
@@ -1395,6 +1746,13 @@ impl FileBrowserState {
                     Span::styled("[N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                     Span::styled("o", styles::help_style()),
                 ]
+            } else if self.switch_confirm.is_some() {
+                vec![
+                    Span::styled("[Y]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled("es  ", styles::help_style()),
+                    Span::styled("[N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled("o", styles::help_style()),
+                ]
             } else if self.rename_input.is_some() {
                 vec![
                     Span::styled("Enter", styles::key_style()),
@@ -1404,6 +1762,17 @@ impl FileBrowserState {
                 ]
             } else if self.pending.is_some() {
                 vec![Span::styled("(transferring...)", styles::help_style())]
+            } else if self.clipboard_panel_open {
+                vec![
+                    Span::styled("n", styles::key_style()),
+                    Span::styled(":next  ", styles::help_style()),
+                    Span::styled("k", styles::key_style()),
+                    Span::styled(":remove  ", styles::help_style()),
+                    Span::styled("p", styles::key_style()),
+                    Span::styled(":paste  ", styles::help_style()),
+                    Span::styled("v", styles::key_style()),
+                    Span::styled(":close", styles::help_style()),
+                ]
             } else if !self.active_panel().expanded_dirs.is_empty() {
                 vec![
                     Span::styled("Tab", styles::key_style()),
@@ -1414,6 +1783,8 @@ impl FileBrowserState {
                     Span::styled(":enter  ", styles::help_style()),
                     Span::styled("\u{2190}", styles::key_style()),
                     Span::styled(":back  ", styles::help_style()),
+                    Span::styled("y", styles::key_style()),
+                    Span::styled(":copy  ", styles::help_style()),
                     Span::styled("x", styles::key_style()),
                     Span::styled(":transfer  ", styles::help_style()),
                     Span::styled("d", styles::key_style()),
@@ -1435,6 +1806,12 @@ impl FileBrowserState {
                     Span::styled(":enter  ", styles::help_style()),
                     Span::styled("\u{2190}", styles::key_style()),
                     Span::styled(":back  ", styles::help_style()),
+                    Span::styled("y", styles::key_style()),
+                    Span::styled(":copy  ", styles::help_style()),
+                    Span::styled("v", styles::key_style()),
+                    Span::styled(":view  ", styles::help_style()),
+                    Span::styled("p", styles::key_style()),
+                    Span::styled(":paste  ", styles::help_style()),
                     Span::styled("x", styles::key_style()),
                     Span::styled(":transfer  ", styles::help_style()),
                     Span::styled("d", styles::key_style()),
@@ -1509,7 +1886,7 @@ impl FileBrowserState {
             .borders(Borders::ALL)
             .border_style(border_style)
             .border_type(if is_active {
-                ratatui::widgets::BorderType::Double
+                ratatui::widgets::BorderType::Plain
             } else {
                 ratatui::widgets::BorderType::Rounded
             });
@@ -1617,8 +1994,11 @@ impl FileBrowserState {
             let entry = &te.entry;
             let display_depth = te.depth;
             let is_selected = idx == panel.cursor;
+            let in_clipboard = self.is_effectively_selected(&entry.name, side, idx);
             let style = if is_selected {
                 selected_style
+            } else if in_clipboard {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
             } else if entry.is_dir {
                 dir_style
             } else {
@@ -1630,7 +2010,13 @@ impl FileBrowserState {
             } else {
                 " "
             };
-            let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+            let icon = if in_clipboard {
+                "[\u{2713}]"
+            } else if entry.is_dir {
+                "\u{1F4C1}"
+            } else {
+                "\u{1F4C4}"
+            };
             let indent = "  ".repeat(display_depth);
             let short_name = entry.name.rsplit('/').next().unwrap_or(&entry.name);
             let name = format!("{}{}{}{}", marker, indent, icon, short_name);
@@ -1673,6 +2059,155 @@ impl FileBrowserState {
                     x: inner.x,
                     y,
                     width: inner.width,
+                    height: 1,
+                },
+            );
+        }
+    }
+
+    fn render_clipboard_panel(&self, f: &mut Frame, area: Rect) {
+        let count = self.clipboard.len();
+
+        // Panel size — wider, with room for header
+        let panel_width = 42u16.min(area.width.saturating_sub(2));
+        let panel_height = (count as u16 + 4).min(area.height).max(5);
+
+        // Bottom-right corner of the panel area
+        let x = area.x + area.width.saturating_sub(panel_width);
+        let y = area.y + area.height.saturating_sub(panel_height);
+
+        let panel_area = Rect { x, y, width: panel_width, height: panel_height };
+
+        // Outer block with rounded border
+        let block = Block::default()
+            .title(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("\u{1F4CB}", Style::default()),
+                Span::styled(
+                    format!(" Selection ({}) ", count),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .border_type(ratatui::widgets::BorderType::Rounded);
+
+        let inner = block.inner(panel_area);
+        f.render_widget(block, panel_area);
+
+        let col_name_w = inner.width.saturating_sub(7) as usize;
+
+        // Header row: "  Name ...  Side"
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("  {:<width$}", "Name", width = col_name_w),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Side",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
+        );
+
+        // Header underline
+        let mut line_spans = vec![];
+        line_spans.push(Span::styled(
+            format!("{}\u{2500}{}\u{2500}{}\u{2500}{}",
+                "\u{2500}".repeat(1),
+                "\u{2500}".repeat(col_name_w.saturating_sub(1)),
+                "\u{2500}".repeat(1),
+                "\u{2500}".repeat(3),
+            ),
+            Style::default().fg(Color::Rgb(60, 60, 90)),
+        ));
+        f.render_widget(
+            Paragraph::new(Line::from(line_spans)),
+            Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
+        );
+
+        // File list
+        let list_start_y = inner.y + 2;
+        let visible_count = (inner.height as usize).saturating_sub(2); // header(2)
+        let scroll = self.clipboard_panel_cursor
+            .saturating_sub(visible_count.saturating_sub(1))
+            .max(0);
+
+        for i in 0..visible_count {
+            let idx = scroll + i;
+            if idx >= self.clipboard.len() {
+                break;
+            }
+            let entry = &self.clipboard[idx];
+            let is_cursor = idx == self.clipboard_panel_cursor;
+
+            let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+            let side_label = match entry.source_side {
+                Side::Local => "L",
+                Side::Remote => "R",
+            };
+
+            let y_pos = list_start_y + i as u16;
+
+            // Row background for cursor
+            if is_cursor {
+                f.render_widget(
+                    Block::default().style(Style::default().bg(Color::Rgb(30, 50, 70))),
+                    Rect { x: inner.x, y: y_pos, width: inner.width, height: 1 },
+                );
+            }
+
+            // Cursor indicator
+            let cursor_mark = if is_cursor { "\u{25B8}" } else { " " };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    cursor_mark,
+                    if is_cursor {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ))),
+                Rect { x: inner.x, y: y_pos, width: 1, height: 1 },
+            );
+
+            // Icon
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    icon,
+                    Style::default(),
+                ))),
+                Rect { x: inner.x + 1, y: y_pos, width: 2, height: 1 },
+            );
+
+            // Name
+            let name_display = truncate_to_width(&entry.name, col_name_w);
+            let name_padded = pad_right(&name_display, col_name_w);
+            let name_style = if is_cursor {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(name_padded, name_style))),
+                Rect { x: inner.x + 3, y: y_pos, width: col_name_w as u16, height: 1 },
+            );
+
+            // Side badge [L] / [R]
+            let side_text = format!("[{}]", side_label);
+            let side_style = if is_cursor {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(side_text, side_style))),
+                Rect {
+                    x: inner.x + inner.width.saturating_sub(4),
+                    y: y_pos,
+                    width: 4,
                     height: 1,
                 },
             );

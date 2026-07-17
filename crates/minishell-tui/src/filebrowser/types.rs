@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use minishell_ssh::sftp::FileEntry;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,4 +26,12 @@ impl Side {
 pub struct TreeEntry {
     pub entry: FileEntry,
     pub depth: usize,
+}
+
+#[derive(Clone)]
+pub struct ClipboardEntry {
+    pub source_path: PathBuf,
+    pub source_side: Side,
+    pub name: String,
+    pub is_dir: bool,
 }
