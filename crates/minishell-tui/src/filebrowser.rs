@@ -1186,7 +1186,7 @@ impl FileBrowserState {
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(10),
-                Constraint::Length(3),
+                Constraint::Length(5),
                 Constraint::Min(10),
             ])
             .split(chunks[1]);
@@ -1582,46 +1582,30 @@ impl FileBrowserState {
 
     fn render_arrow(&self, f: &mut Frame, area: Rect) {
         use ratatui::widgets::Clear;
-
         f.render_widget(Clear, area);
-
-        if area.height < 5 || area.width < 3 {
+        if area.height < 1 || area.width < 5 {
             return;
         }
-
         let mid_y = area.y + area.height / 2;
-
-        let (color, top, mid, bot) = if self.pending.is_some() {
+        let (symbol, color) = if self.pending.is_some() {
             match self.active_side {
-                Side::Local => (Color::Yellow, " \u{2584} ", "\u{2501}\u{2501}\u{25B6}", " \u{2580} "),
-                Side::Remote => (Color::Yellow, " \u{2584} ", "\u{25C0}\u{2501}\u{2501}", " \u{2580} "),
+                Side::Local => ("===> ", Color::Yellow),
+                Side::Remote => (" <===", Color::Yellow),
             }
         } else if self.transfer_confirm.is_some() {
             match self.transfer_confirm.unwrap() {
-                Side::Local => (Color::Green, " \u{2584} ", "\u{2501}\u{2501}\u{25B6}", " \u{2580} "),
-                Side::Remote => (Color::Green, " \u{2584} ", "\u{25C0}\u{2501}\u{2501}", " \u{2580} "),
+                Side::Local => ("===> ", Color::Green),
+                Side::Remote => (" <===", Color::Green),
             }
         } else {
-            return;
+            ("  ·  ", Color::DarkGray)
         };
-
-        // Top: ▄
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(top, Style::default().fg(color)))),
-            Rect { x: area.x, y: mid_y - 1, width: area.width, height: 1 },
-        );
-        // Middle: ━━▶ or ◀━━
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                mid,
+                symbol,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ))),
             Rect { x: area.x, y: mid_y, width: area.width, height: 1 },
-        );
-        // Bottom: ▀
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(bot, Style::default().fg(color)))),
-            Rect { x: area.x, y: mid_y + 1, width: area.width, height: 1 },
         );
     }
 }
