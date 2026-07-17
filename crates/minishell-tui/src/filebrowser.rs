@@ -1284,9 +1284,10 @@ impl FileBrowserState {
                     let rest = &status_text[type_end + 2..]; // after "] "
                     spans.push(Span::styled(type_part, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                     // Find " → " separator
-                    if let Some(arrow_pos) = rest.find(" \u{2192} ") {
+                    let arrow_sep = " \u{2192} ";
+                    if let Some(arrow_pos) = rest.find(arrow_sep) {
                         let name_and_src = &rest[..arrow_pos];
-                        let dst_and_q = &rest[arrow_pos + 3..]; // after " → "
+                        let dst_and_q = &rest[arrow_pos + arrow_sep.len()..];
                         // Split name from src path (first space separates them)
                         if let Some(space_pos) = name_and_src.find(' ') {
                             let name = &name_and_src[..space_pos];
