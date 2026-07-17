@@ -899,8 +899,8 @@ impl FileBrowserState {
             }
         };
         let direction_label = match side {
-            Side::Local => "Upload",
-            Side::Remote => "Download",
+            Side::Local => "Push",
+            Side::Remote => "Pull",
         };
         let arrow = match side {
             Side::Local => "->",
