@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 minishell-core = { workspace = true }
+minishell-utils = { workspace = true }
 minishell-store = { workspace = true }
 minishell-ssh = { workspace = true }
 ssh2 = "0.9"

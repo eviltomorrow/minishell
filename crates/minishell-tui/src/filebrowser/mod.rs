@@ -16,10 +16,13 @@ use crate::styles;
 pub mod types;
 pub mod panel;
 pub mod transfer;
+pub mod render;
 
 pub use types::{Side, TreeEntry};
 pub use panel::PanelState;
 pub use transfer::{TransferProgressState, ActionResult, PendingTransfer};
+pub use render::{HEADER_FG, ACTIVE_BORDER, INACTIVE_BORDER, DIR_FG, FILE_FG, SELECTED_BG, STATUS_OK, STATUS_ERR, DIM, HINT, render_name_and_path};
+use render::{format_size, pad_left, pad_right, truncate_to_width};
 
 pub struct FileBrowserState {
     machine: Machine,
@@ -40,17 +43,6 @@ pub struct FileBrowserState {
     connect_start: std::time::Instant,
     visible_rows: usize,
 }
-
-const HEADER_FG: Color = Color::Cyan;
-const ACTIVE_BORDER: Color = Color::Cyan;
-const INACTIVE_BORDER: Color = Color::DarkGray;
-const DIR_FG: Color = Color::Yellow;
-const FILE_FG: Color = Color::White;
-const SELECTED_BG: Color = Color::Blue;
-const STATUS_OK: Color = Color::Green;
-const STATUS_ERR: Color = Color::Red;
-const DIM: Color = Color::DarkGray;
-const HINT: Color = Color::Gray;
 
 impl FileBrowserState {
     pub fn new(machine: Machine) -> Self {
@@ -1546,72 +1538,4 @@ impl FileBrowserState {
             );
         }
     }
-}
-
-const PIPE_SEP: char = '\u{2502}'; // │
-
-fn render_name_and_path<'a>(text: &'a str, name_style: Style, sep_style: Style, path_style: Style) -> Vec<Span<'a>> {
-    match text.find(PIPE_SEP) {
-        Some(p) => {
-            let name = &text[..p];
-            let path = &text[p + PIPE_SEP.len_utf8()..];
-            vec![
-                Span::styled(format!(" {} ", name), name_style),
-                Span::styled(format!("{} ", PIPE_SEP), sep_style),
-                Span::styled(path, path_style),
-            ]
-        }
-        None => vec![Span::styled(format!(" {} ", text), name_style)],
-    }
-}
-
-fn format_size(size: u64) -> String {
-    const UNITS: &[&str] = &["B", "K", "M", "G", "T"];
-    let mut s = size as f64;
-    let mut unit_idx = 0;
-    while s >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        s /= 1024.0;
-        unit_idx += 1;
-    }
-    if unit_idx == 0 {
-        format!("{} B", size)
-    } else if s >= 100.0 {
-        format!("{:.0} {}", s, UNITS[unit_idx])
-    } else if s >= 10.0 {
-        format!("{:.1} {}", s, UNITS[unit_idx])
-    } else {
-        format!("{:.2} {}", s, UNITS[unit_idx])
-    }
-}
-
-fn pad_left(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        truncate_to_width(s, width)
-    } else {
-        format!("{}{}", " ".repeat(width - w), s)
-    }
-}
-
-fn pad_right(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        truncate_to_width(s, width)
-    } else {
-        format!("{}{}", s, " ".repeat(width - w))
-    }
-}
-
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    let mut result = String::new();
-    let mut current_width = 0;
-    for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + cw > max_width {
-            break;
-        }
-        result.push(c);
-        current_width += cw;
-    }
-    result
 }
