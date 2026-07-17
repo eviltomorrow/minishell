@@ -372,3 +372,34 @@ pub fn format_modified(mtime: Option<u64>) -> String {
         None => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_perm_directory() {
+        assert_eq!(format_perm(Some(0o755), true), "drwxr-xr-x");
+    }
+
+    #[test]
+    fn test_format_perm_file() {
+        assert_eq!(format_perm(Some(0o644), false), "-rw-r--r--");
+    }
+
+    #[test]
+    fn test_format_perm_none() {
+        assert_eq!(format_perm(None, false), "");
+    }
+
+    #[test]
+    fn test_format_modified_some() {
+        let result = format_modified(Some(1609459200));
+        assert!(result.contains("2021"));
+    }
+
+    #[test]
+    fn test_format_modified_none() {
+        assert_eq!(format_modified(None), "");
+    }
+}
