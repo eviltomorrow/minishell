@@ -35,9 +35,11 @@ pub struct FileBrowserState {
     progress_file_name: String,
     progress_current: u64,
     progress_total: u64,
-    confirm_delete: Option<(Side, usize)>,
+    confirm_delete: Option<(Side, String)>,
     transfer_confirm: Option<Side>,
     rename_input: Option<String>,
+    old_entry_name: String,
+    old_entry_path: std::path::PathBuf,
     connecting_dots: u8,
     pending_connect: Option<mpsc::Receiver<Result<ssh2::Session, String>>>,
     connect_start: std::time::Instant,
@@ -61,6 +63,8 @@ impl FileBrowserState {
             confirm_delete: None,
             transfer_confirm: None,
             rename_input: None,
+            old_entry_name: String::new(),
+            old_entry_path: std::path::PathBuf::new(),
             connecting_dots: 0,
             pending_connect: None,
             connect_start: std::time::Instant::now(),
@@ -258,7 +262,11 @@ impl FileBrowserState {
             .cursor
             .min(self.local.entries.len().saturating_sub(1));
         self.local.scroll_offset = 0;
-        Self::sync_tree(&mut self.local);
+        if self.local.expanded_dirs.is_empty() {
+            Self::sync_tree(&mut self.local);
+        } else {
+            self.rebuild_panel_tree(Side::Local);
+        }
     }
 
     fn refresh_remote(&mut self) {
@@ -284,7 +292,11 @@ impl FileBrowserState {
                     .cursor
                     .min(self.remote.entries.len().saturating_sub(1));
                 self.remote.scroll_offset = 0;
-                Self::sync_tree(&mut self.remote);
+                if self.remote.expanded_dirs.is_empty() {
+                    Self::sync_tree(&mut self.remote);
+                } else {
+                    self.rebuild_panel_tree(Side::Remote);
+                }
                 self.status = format!("{} entries", self.remote.entries.len());
             }
             Err(e) => {
@@ -447,6 +459,56 @@ impl FileBrowserState {
         path.join(&te.entry.name)
     }
 
+    fn current_entry(&self) -> Option<FileEntry> {
+        let p = self.active_panel();
+        if !p.expanded_dirs.is_empty() {
+            p.tree_entries.get(p.cursor).map(|te| te.entry.clone())
+        } else {
+            p.entries.get(p.cursor).cloned()
+        }
+    }
+
+    fn current_entry_full_path(&self) -> PathBuf {
+        let p = self.active_panel();
+        if !p.expanded_dirs.is_empty() {
+            Self::tree_entry_full_path(p, p.cursor)
+        } else {
+            let entry = match p.entries.get(p.cursor) {
+                Some(e) => e,
+                None => return p.current_path.clone(),
+            };
+            p.current_path.join(&entry.name)
+        }
+    }
+
+    fn current_entry_for_side(&self, side: Side) -> Option<FileEntry> {
+        let p = match side {
+            Side::Local => &self.local,
+            Side::Remote => &self.remote,
+        };
+        if !p.expanded_dirs.is_empty() {
+            p.tree_entries.get(p.cursor).map(|te| te.entry.clone())
+        } else {
+            p.entries.get(p.cursor).cloned()
+        }
+    }
+
+    fn entry_full_path_for_side(&self, side: Side) -> PathBuf {
+        let p = match side {
+            Side::Local => &self.local,
+            Side::Remote => &self.remote,
+        };
+        if !p.expanded_dirs.is_empty() {
+            Self::tree_entry_full_path(p, p.cursor)
+        } else {
+            let entry = match p.entries.get(p.cursor) {
+                Some(e) => e,
+                None => return p.current_path.clone(),
+            };
+            p.current_path.join(&entry.name)
+        }
+    }
+
     pub fn toggle_tree(&mut self) {
         if self.active_side == Side::Remote && self.session.is_none() {
             self.status = "Not connected".to_string();
@@ -523,8 +585,20 @@ impl FileBrowserState {
         new_expanded.push(full_path);
 
         match side {
-            Side::Local => self.local.expanded_dirs = new_expanded,
-            Side::Remote => self.remote.expanded_dirs = new_expanded,
+            Side::Local => {
+                for p in new_expanded {
+                    if !self.local.expanded_dirs.contains(&p) {
+                        self.local.expanded_dirs.push(p);
+                    }
+                }
+            }
+            Side::Remote => {
+                for p in new_expanded {
+                    if !self.remote.expanded_dirs.contains(&p) {
+                        self.remote.expanded_dirs.push(p);
+                    }
+                }
+            }
         }
         self.rebuild_panel_tree(side);
         let count = match side {
@@ -644,6 +718,73 @@ impl FileBrowserState {
         }
     }
 
+    fn collapse_or_navigate_tree(&mut self) {
+        let p = self.active_panel();
+        if p.expanded_dirs.is_empty() || p.tree_entries.is_empty() {
+            self.parent_dir();
+            return;
+        }
+
+        let te = &p.tree_entries[p.cursor];
+        let is_expanded = te.entry.is_dir
+            && p.expanded_dirs.iter().any(|d| {
+                d.file_name().map(|n| n.to_string_lossy() == te.entry.name).unwrap_or(false)
+            });
+
+        if is_expanded {
+            let full_path = Self::tree_entry_full_path(p, p.cursor);
+            let depth = te.depth;
+
+            if depth == 0 {
+                let side = self.active_side;
+                match side {
+                    Side::Local => self.local.expanded_dirs.retain(|p| !p.starts_with(&full_path)),
+                    Side::Remote => self.remote.expanded_dirs.retain(|p| !p.starts_with(&full_path)),
+                }
+                self.rebuild_panel_tree(side);
+            } else {
+                let side = self.active_side;
+                match side {
+                    Side::Local => self.local.expanded_dirs.retain(|p| !p.starts_with(&full_path)),
+                    Side::Remote => self.remote.expanded_dirs.retain(|p| !p.starts_with(&full_path)),
+                }
+                let cursor = self.active_panel().cursor;
+                let parent_depth = depth - 1;
+                let mut parent_idx = None;
+                for i in (0..cursor).rev() {
+                    if self.active_panel().tree_entries[i].depth == parent_depth {
+                        parent_idx = Some(i);
+                        break;
+                    }
+                }
+                if let Some(idx) = parent_idx {
+                    self.active_panel_mut().cursor = idx;
+                }
+                self.rebuild_panel_tree(side);
+            }
+        } else {
+            let depth = te.depth;
+            if depth == 0 {
+                self.parent_dir();
+                return;
+            }
+            let cursor = p.cursor;
+            let parent_depth = depth - 1;
+            let mut parent_idx = None;
+            for i in (0..cursor).rev() {
+                if p.tree_entries[i].depth == parent_depth {
+                    parent_idx = Some(i);
+                    break;
+                }
+            }
+            if let Some(idx) = parent_idx {
+                self.active_panel_mut().cursor = idx;
+            } else {
+                self.parent_dir();
+            }
+        }
+    }
+
     fn parent_dir(&mut self) {
         let (parent, prev_name) = {
             let p = self.active_panel();
@@ -715,13 +856,13 @@ impl FileBrowserState {
         if self.pending.is_some() {
             return;
         }
-        let entry = match self.local.entries.get(self.local.cursor).cloned() {
+        let entry = match self.current_entry_for_side(Side::Local) {
             Some(e) => e,
             None => return,
         };
 
-        let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
-        let local_path = self.local.current_path.join(&filename);
+        let filename = entry.name.clone();
+        let local_path = self.entry_full_path_for_side(Side::Local);
         let remote_path = self.remote.current_path.join(&filename);
         let remote_str = remote_path.to_string_lossy().to_string();
         let is_dir = entry.is_dir;
@@ -766,13 +907,13 @@ impl FileBrowserState {
         if self.pending.is_some() {
             return;
         }
-        let entry = match self.remote.entries.get(self.remote.cursor).cloned() {
+        let entry = match self.current_entry_for_side(Side::Remote) {
             Some(e) => e,
             None => return,
         };
 
-        let remote_path = self.remote.current_path.join(&entry.name);
-        let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+        let filename = entry.name.clone();
+        let remote_path = self.entry_full_path_for_side(Side::Remote);
         let local_path = self.local.current_path.join(&filename);
         let remote_str = remote_path.to_string_lossy().to_string();
         let is_dir = entry.is_dir;
@@ -819,22 +960,25 @@ impl FileBrowserState {
             return;
         }
         let side = self.active_side;
-        let (entry, local_path, remote_path) = {
-            let p = self.active_panel();
-            let entry = match p.entries.get(p.cursor).cloned() {
-                Some(e) => e,
-                None => return,
-            };
-            if entry.name == ".." {
-                return;
-            }
-            (entry, self.local.current_path.clone(), self.remote.current_path.clone())
+        let entry = match self.current_entry() {
+            Some(e) => e,
+            None => return,
         };
-        let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+        if entry.name == ".." {
+            return;
+        }
+        let full_path = self.current_entry_full_path();
+        let filename = entry.name.clone();
         let type_label = if entry.is_dir { "[DIR]" } else { "[FILE]" };
         let (src_path, dst_path) = match side {
-            Side::Local => (local_path.join(&filename), remote_path.join(&filename)),
-            Side::Remote => (remote_path.join(&filename), local_path.join(&filename)),
+            Side::Local => {
+                let remote_path = self.remote.current_path.join(&filename);
+                (full_path, remote_path)
+            }
+            Side::Remote => {
+                let local_path = self.local.current_path.join(&filename);
+                (local_path, full_path)
+            }
         };
         let direction_label = match side {
             Side::Local => "Push",
@@ -865,16 +1009,11 @@ impl FileBrowserState {
 
     fn start_delete(&mut self) {
         let side = self.active_side;
-        let (entry, cursor, full_path) = {
-            let p = self.active_panel();
-            let cursor = p.cursor;
-            let entry = match p.entries.get(cursor).cloned() {
-                Some(e) => e,
-                None => return,
-            };
-            let full_path = p.current_path.join(&entry.name);
-            (entry, cursor, full_path)
+        let entry = match self.current_entry() {
+            Some(e) => e,
+            None => return,
         };
+        let full_path = self.current_entry_full_path();
         let side_label = match side {
             Side::Local => "Local",
             Side::Remote => "Remote",
@@ -884,26 +1023,26 @@ impl FileBrowserState {
             "Delete:|{}|{}│{}|{}",
             type_label, entry.name, full_path.display(), side_label
         );
-        self.confirm_delete = Some((side, cursor));
+        self.confirm_delete = Some((side, entry.name));
     }
 
     fn confirm_delete_action(&mut self) {
-        let (side, idx) = match self.confirm_delete.take() {
+        let (side, entry_name) = match self.confirm_delete.take() {
             Some(v) => v,
             None => return,
         };
 
-        let (path_str, entry_name, is_dir) = {
+        let (path_str, is_dir) = {
             let panel = match side {
                 Side::Local => &self.local,
                 Side::Remote => &self.remote,
             };
-            let entry = match panel.entries.get(idx) {
+            let entry = match panel.entries.iter().find(|e| e.name == entry_name) {
                 Some(e) => e.clone(),
                 None => return,
             };
             let p = panel.current_path.join(&entry.name);
-            (p.to_string_lossy().to_string(), entry.name.clone(), entry.is_dir)
+            (p.to_string_lossy().to_string(), entry.is_dir)
         };
 
         let result = if side == Side::Local {
@@ -951,15 +1090,13 @@ impl FileBrowserState {
     }
 
     fn start_rename(&mut self) {
-        let entry_name = {
-            let p = self.active_panel();
-            match p.entries.get(p.cursor) {
-                Some(e) => e.clone(),
-                None => return,
-            }
+        let entry = match self.current_entry() {
+            Some(e) => e,
+            None => return,
         };
-        let short = entry_name.name.rsplit('/').next().unwrap_or(&entry_name.name).to_string();
-        self.rename_input = Some(short);
+        self.old_entry_name = entry.name.clone();
+        self.old_entry_path = self.current_entry_full_path();
+        self.rename_input = Some(entry.name.clone());
         self.status = "Enter new name:".to_string();
     }
 
@@ -972,20 +1109,8 @@ impl FileBrowserState {
             }
         };
         let side = self.active_side;
-        let (old_path, new_path) = {
-            let panel = match side {
-                Side::Local => &self.local,
-                Side::Remote => &self.remote,
-            };
-            let old_entry = match panel.entries.get(panel.cursor) {
-                Some(e) => e.clone(),
-                None => return,
-            };
-            (
-                panel.current_path.join(&old_entry.name),
-                panel.current_path.join(&new_name),
-            )
-        };
+        let old_path = self.old_entry_path.clone();
+        let new_path = old_path.parent().unwrap_or(&old_path).join(&new_name);
 
         let result = match side {
             Side::Local => std::fs::rename(&old_path, &new_path).map_err(|e| e.to_string()),
@@ -1073,22 +1198,14 @@ impl FileBrowserState {
             return;
         }
 
-        if !self.active_panel().expanded_dirs.is_empty() {
-            match key.code {
-                KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Char('r') => {
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         match key.code {
             KeyCode::Up => self.move_cursor(-1, self.visible_rows),
             KeyCode::Down => self.move_cursor(1, self.visible_rows),
             KeyCode::PageUp => self.cursor_first(),
             KeyCode::PageDown => self.cursor_last(self.visible_rows),
             KeyCode::Right | KeyCode::Enter => self.enter_dir(),
-            KeyCode::Left | KeyCode::Esc => self.parent_dir(),
+            KeyCode::Left => self.collapse_or_navigate_tree(),
+            KeyCode::Esc => self.parent_dir(),
             KeyCode::Tab => self.toggle_side(),
             KeyCode::Char('/') => self.goto_root(),
             KeyCode::Char('~') => self.goto_home(),
@@ -1297,6 +1414,12 @@ impl FileBrowserState {
                     Span::styled(":enter  ", styles::help_style()),
                     Span::styled("\u{2190}", styles::key_style()),
                     Span::styled(":back  ", styles::help_style()),
+                    Span::styled("x", styles::key_style()),
+                    Span::styled(":transfer  ", styles::help_style()),
+                    Span::styled("d", styles::key_style()),
+                    Span::styled(":del  ", styles::help_style()),
+                    Span::styled("r", styles::key_style()),
+                    Span::styled(":rename  ", styles::help_style()),
                     Span::styled("t", styles::key_style()),
                     Span::styled(":tree  ", styles::help_style()),
                     Span::styled("q", styles::key_style()),
