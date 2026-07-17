@@ -648,6 +648,7 @@ impl FileBrowserState {
         };
         let full_path = self.current_entry_full_path();
         self.clipboard.clear();
+        self.clipboard_panel_cursor = 0;
         self.clipboard_side = Some(side);
         self.clipboard.push(ClipboardEntry {
             source_path: full_path,
@@ -707,6 +708,7 @@ impl FileBrowserState {
             None => return,
         };
         if clip_side == self.active_side {
+            self.status = format!("Already on {} side", clip_side.label());
             return;
         }
         if clip_side == Side::Remote && self.session.is_none() {
@@ -1526,6 +1528,9 @@ impl FileBrowserState {
                     self.close_clipboard_panel();
                     self.paste_from_clipboard();
                     return;
+                }
+                KeyCode::Char('y') => {
+                    return; // block yank while panel is open
                 }
                 _ => {} // fall through to normal handler
             }
