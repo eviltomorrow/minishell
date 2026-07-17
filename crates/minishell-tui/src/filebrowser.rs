@@ -903,8 +903,8 @@ impl FileBrowserState {
             Side::Remote => "Download",
         };
         let arrow = match side {
-            Side::Local => "\u{2550}\u{2550}\u{25B6}",  // ══▶
-            Side::Remote => "\u{25C0}\u{2550}\u{2550}",  // ◀══
+            Side::Local => "->",
+            Side::Remote => "<-",
         };
         self.status = format!(
             "{} {} {} {} {} {}?",
@@ -1303,12 +1303,10 @@ impl FileBrowserState {
                         spans.push(Span::styled(type_part, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                         let after_type = &status_text[type_end + 2..]; // "] "
                         // Find the arrow
-                        let upload_arrow = "\u{2550}\u{2550}\u{25B6}"; // ══▶
-                        let download_arrow = "\u{25C0}\u{2550}\u{2550}"; // ◀══
-                        let (arrow_str, arrow_pos) = if let Some(pos) = after_type.find(upload_arrow) {
-                            (upload_arrow, pos)
-                        } else if let Some(pos) = after_type.find(download_arrow) {
-                            (download_arrow, pos)
+                        let (arrow_str, arrow_pos) = if let Some(pos) = after_type.find(" -> ") {
+                            ("->", pos)
+                        } else if let Some(pos) = after_type.find(" <- ") {
+                            ("<-", pos)
                         } else {
                             ("", 0)
                         };
