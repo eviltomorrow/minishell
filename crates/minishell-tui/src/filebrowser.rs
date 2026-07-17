@@ -1222,6 +1222,8 @@ impl FileBrowserState {
                 } else {
                     self.status.clone()
                 }
+            } else if self.transfer_confirm.is_some() {
+                self.status.clone()
             } else if self.pending.is_some() && self.progress_total > 0 {
                 let pct = (self.progress_current * 100 / self.progress_total) as usize;
                 let bar_width = 20;
@@ -1265,6 +1267,22 @@ impl FileBrowserState {
                         spans.push(Span::styled(rest, Style::default().fg(Color::DarkGray)));
                     }
                 }
+            } else if self.transfer_confirm.is_some() {
+                if let Some(type_end) = status_text.find(']') {
+                    let type_part = &status_text[..=type_end];
+                    let rest = &status_text[type_end + 1..];
+                    spans.push(Span::styled(type_part, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                    if let Some(dir_pos) = rest.find('\u{2192}').or_else(|| rest.find('\u{2190}')) {
+                        let name = &rest[..dir_pos];
+                        let direction = &rest[dir_pos..];
+                        spans.push(Span::styled(name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+                        spans.push(Span::styled(direction, Style::default().fg(Color::Green)));
+                    } else {
+                        spans.push(Span::styled(rest, Style::default().fg(Color::White)));
+                    }
+                } else {
+                    spans.push(Span::styled(&status_text, Style::default().fg(Color::Cyan)));
+                }
             } else {
                 spans.push(Span::styled(&status_text, Style::default().fg(status_color)));
             }
@@ -1276,6 +1294,13 @@ impl FileBrowserState {
                     Span::styled("[Y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                     Span::styled("es  ", styles::help_style()),
                     Span::styled("[N]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("o", styles::help_style()),
+                ]
+            } else if self.transfer_confirm.is_some() {
+                vec![
+                    Span::styled("[Y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("es  ", styles::help_style()),
+                    Span::styled("[N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                     Span::styled("o", styles::help_style()),
                 ]
             } else if self.rename_input.is_some() {
@@ -1312,11 +1337,9 @@ impl FileBrowserState {
                     Span::styled(":enter  ", styles::help_style()),
                     Span::styled("\u{2190}", styles::key_style()),
                     Span::styled(":back  ", styles::help_style()),
-                    Span::styled("u", styles::key_style()),
-                    Span::styled(":upload  ", styles::help_style()),
-                    Span::styled("d", styles::key_style()),
-                    Span::styled(":download  ", styles::help_style()),
                     Span::styled("x", styles::key_style()),
+                    Span::styled(":transfer  ", styles::help_style()),
+                    Span::styled("d", styles::key_style()),
                     Span::styled(":del  ", styles::help_style()),
                     Span::styled("r", styles::key_style()),
                     Span::styled(":rename  ", styles::help_style()),
