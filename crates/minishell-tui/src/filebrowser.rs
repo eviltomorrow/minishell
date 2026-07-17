@@ -1583,57 +1583,60 @@ impl FileBrowserState {
     fn render_arrow(&self, f: &mut Frame, area: Rect) {
         use ratatui::widgets::Clear;
 
+        f.render_widget(Clear, area);
+
         if area.height < 1 || area.width < 3 {
-            f.render_widget(Clear, area);
             return;
         }
 
-        let (symbol, fg, bg) = if self.pending.is_some() {
-            match self.active_side {
-                Side::Local => ("\u{25B6}", Color::Black, Color::Yellow),
-                Side::Remote => ("\u{25C0}", Color::Black, Color::Yellow),
-            }
-        } else if self.transfer_confirm.is_some() {
-            match self.transfer_confirm.unwrap() {
-                Side::Local => ("\u{25B6}", Color::White, Color::Green),
-                Side::Remote => ("\u{25C0}", Color::White, Color::Green),
-            }
-        } else {
-            ("\u{2502}", Color::DarkGray, Color::Reset)
-        };
+        let mid_y = area.y + area.height / 2;
 
-        // Full-height colored background band
-        for row in 0..area.height {
-            let line = Line::from(Span::styled(
-                " \u{2502} ",
-                Style::default().fg(Color::DarkGray).bg(bg),
-            ));
+        if self.pending.is_some() {
+            // Transfer in progress: thin yellow line + arrow
+            for x in 0..area.width {
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "\u{2500}",
+                        Style::default().fg(Color::Yellow),
+                    ))),
+                    Rect { x: area.x + x, y: mid_y, width: 1, height: 1 },
+                );
+            }
+            let symbol = match self.active_side {
+                Side::Local => "\u{25B6}",
+                Side::Remote => "\u{25C0}",
+            };
             f.render_widget(
-                Paragraph::new(line),
-                Rect {
-                    x: area.x,
-                    y: area.y + row,
-                    width: area.width,
-                    height: 1,
-                },
+                Paragraph::new(Line::from(Span::styled(
+                    symbol,
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ))),
+                Rect { x: area.x + 1, y: mid_y, width: 1, height: 1 },
+            );
+        } else if self.transfer_confirm.is_some() {
+            // Awaiting confirm: thin green line + arrow
+            for x in 0..area.width {
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "\u{2500}",
+                        Style::default().fg(Color::Green),
+                    ))),
+                    Rect { x: area.x + x, y: mid_y, width: 1, height: 1 },
+                );
+            }
+            let symbol = match self.transfer_confirm.unwrap() {
+                Side::Local => "\u{25B6}",
+                Side::Remote => "\u{25C0}",
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    symbol,
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ))),
+                Rect { x: area.x + 1, y: mid_y, width: 1, height: 1 },
             );
         }
-
-        // Overlay arrow at vertical center
-        let y = area.y + area.height / 2;
-        let arrow_line = Line::from(Span::styled(
-            symbol,
-            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-        ));
-        f.render_widget(
-            Paragraph::new(arrow_line),
-            Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: 1,
-            },
-        );
+        // Idle: empty (already cleared)
     }
 }
 
