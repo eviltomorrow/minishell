@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use minishell_core::Machine;
 use minishell_store::Store;
+use minishell_utils::{pad_left, pad_right};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Parser)]
@@ -60,30 +61,11 @@ fn open_db() -> Result<Store> {
 }
 
 fn pad_str(s: &str, width: usize, align_left: bool) -> String {
-    let visible = UnicodeWidthStr::width(s);
-    if visible >= width {
-        return truncate_to_width(s, width);
-    }
-    let padding = " ".repeat(width - visible);
     if align_left {
-        format!("{}{}", s, padding)
+        pad_right(s, width)
     } else {
-        format!("{}{}", padding, s)
+        pad_left(s, width)
     }
-}
-
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    let mut result = String::new();
-    let mut current_width = 0;
-    for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + cw > max_width {
-            break;
-        }
-        result.push(c);
-        current_width += cw;
-    }
-    result
 }
 
 fn print_machines(machines: &[Machine]) {

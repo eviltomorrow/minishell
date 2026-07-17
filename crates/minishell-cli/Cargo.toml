@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 minishell-core = { workspace = true }
+minishell-utils = { workspace = true }
 minishell-store = { workspace = true }
 minishell-ssh = { workspace = true }
 minishell-tui = { workspace = true }
