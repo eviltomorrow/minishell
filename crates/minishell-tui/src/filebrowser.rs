@@ -900,9 +900,13 @@ impl FileBrowserState {
             Side::Local => "->",
             Side::Remote => "<-",
         };
+        let (left_path, right_path) = match side {
+            Side::Local => (src_path, dst_path),   // src -> dst
+            Side::Remote => (dst_path, src_path),   // dst <- src
+        };
         self.status = format!(
             "{}:|{}|{}│{}|{}|{}",
-            direction_label, type_label, filename, src_path.display(), arrow, dst_path.display()
+            direction_label, type_label, filename, left_path.display(), arrow, right_path.display()
         );
         self.transfer_confirm = Some(side);
     }
