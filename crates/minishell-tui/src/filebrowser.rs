@@ -944,8 +944,8 @@ impl FileBrowserState {
         };
         let type_label = if entry.is_dir { "[DIR]" } else { "[FILE]" };
         self.status = format!(
-            "Delete|{}|{}|{}|{}",
-            type_label, entry.name, side_label, full_path.display()
+            "Delete:|{}|{}│{}|{}",
+            type_label, entry.name, full_path.display(), side_label
         );
         self.confirm_delete = Some((side, cursor));
     }
@@ -1264,9 +1264,9 @@ impl FileBrowserState {
                 spans.push(Span::styled("\u{2591}".repeat(empty), Style::default().fg(Color::DarkGray)));
                 spans.push(Span::styled(format!(" {}%", pct), Style::default().fg(Color::Yellow)));
             } else if self.confirm_delete.is_some() {
-                // Format: "Delete|[DIR]|name|Local|/full/path"
+                // Format: "Delete:|[DIR]|name│/full/path|side"
                 let parts: Vec<&str> = status_text.split('|').collect();
-                if parts.len() >= 5 {
+                if parts.len() >= 4 {
                     spans.push(Span::styled(
                         format!("{} ", parts[0]),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1275,17 +1275,32 @@ impl FileBrowserState {
                         parts[1],
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ));
+                    // name│/full/path
+                    let name_and_path = parts[2];
+                    if let Some(p) = name_and_path.find('\u{2502}') {
+                        let name = &name_and_path[..p];
+                        let path = &name_and_path[p + '\u{2502}'.len_utf8()..];
+                        spans.push(Span::styled(
+                            format!(" {} ", name),
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            "\u{2502} ",
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                        spans.push(Span::styled(
+                            format!("{}?", path),
+                            Style::default().fg(Color::Cyan),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            format!(" {}?", name_and_path),
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        ));
+                    }
                     spans.push(Span::styled(
-                        format!(" {} ", parts[2]),
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled(
-                        format!("({})", parts[3]),
+                        format!(" ({})", parts[3]),
                         Style::default().fg(Color::DarkGray),
-                    ));
-                    spans.push(Span::styled(
-                        format!(" {}?", parts[4]),
-                        Style::default().fg(Color::Cyan),
                     ));
                 } else {
                     spans.push(Span::styled(&status_text, Style::default().fg(Color::Red)));
