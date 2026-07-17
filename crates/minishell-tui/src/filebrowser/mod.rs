@@ -179,8 +179,17 @@ impl FileBrowserState {
             None => return,
         };
 
+        let progress_arc = transfer.progress.clone();
+
         {
-            let p = transfer.progress.lock().unwrap();
+            let p = match progress_arc.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.clear_transfer();
+                    self.status = "Transfer failed (internal error)".to_string();
+                    return;
+                }
+            };
             self.progress_file_name = p.file_name.clone();
             self.progress_current = p.bytes;
             self.progress_total = p.total;
@@ -574,7 +583,9 @@ impl FileBrowserState {
                         self.status = format!("{} ({})", entry.name, size_str);
                         return;
                     }
-                    let dir_name = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+                    let dir_name = parent.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
                     (parent.to_path_buf(), dir_name)
                 } else {
                     return;

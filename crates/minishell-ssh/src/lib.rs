@@ -244,7 +244,7 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
         Err(e) => println!("{}", card::connect_fail_line(&e.to_string(), card_width)),
     }
 
-    println!("{}", card::disconnect_card(host, duration, result.err().map(|e| e.to_string()).as_deref(), max_width));
+    println!("{}", card::disconnect_card(host, duration, None, max_width));
     let _ = std::io::stdout().flush();
 
     Ok(duration)
