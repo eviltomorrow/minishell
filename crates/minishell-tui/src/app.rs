@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthStr;
 use minishell_core::Machine;
 use minishell_store::Store;
 
@@ -28,7 +29,6 @@ pub struct AppState {
     pub filebrowser: Option<FileBrowserState>,
     pub should_quit: bool,
     pub login_target: Option<Machine>,
-
 }
 
 pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
@@ -54,7 +54,6 @@ pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
 
 fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: Arc<Store>) -> anyhow::Result<()> {
     let machines = store.search("")?;
-    let _total = store.count_all()?;
     let columns = default_columns();
     let table = MachineTable::new(columns);
 
@@ -149,9 +148,19 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
             Constraint::Length(1),   // separator
             Constraint::Min(5),     // table
             Constraint::Length(1),   // separator
-            Constraint::Length(1),   // status + help combined
+            Constraint::Length(1),   // status + help
         ])
         .split(area);
+
+    // Horizontal padding for content
+    let content_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(1),   // left padding
+            Constraint::Min(10),    // main content
+            Constraint::Length(1),   // right padding
+        ])
+        .split(main_chunks[3]);
 
     // Title
     let title = Line::from(vec![
@@ -166,7 +175,7 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
         let search_text = if state.search_focused {
             format!("search> {}▌", state.search_input)
         } else if !state.search_input.is_empty() {
-            format!("search> {} (Esc to clear)", state.search_input)
+            format!("search> {}", state.search_input)
         } else {
             "search> (press / to search)".to_string()
         };
@@ -182,18 +191,19 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     f.render_widget(sep, main_chunks[2]);
 
     // Table
-    let table_height = main_chunks[3].height;
-    state.table.set_size(area.width, table_height);
+    let table_height = content_chunks[1].height;
+    state.table.set_size(content_chunks[1].width, table_height);
     let selected_style = styles::selected_style();
     let normal_style = Style::default();
-    state.table.render(main_chunks[3], f.buffer_mut(), selected_style, normal_style);
+    state.table.render(content_chunks[1], f.buffer_mut(), selected_style, normal_style);
 
-    // Separator
+    // Separator (same length as header)
     let sep2 = Line::from(vec![Span::styled("─".repeat(area.width as usize), styles::separator_style())]);
     f.render_widget(sep2, main_chunks[4]);
 
-    // Status + Help bar
+    // Status + Help bar (single line, left-right split, aligned with table)
     let mut status_spans: Vec<Span> = vec![];
+    status_spans.push(Span::raw(" ")); // left padding to match table
     if let Some(m) = state.machines.get(state.table.cursor()) {
         status_spans.push(Span::styled(format!("{}/{}", state.table.cursor() + 1, state.machines.len()), styles::status_style()));
         status_spans.push(Span::styled(" │ ", styles::status_sep_style()));
@@ -212,26 +222,48 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
         status_spans.push(Span::styled("no machines", styles::status_sep_style()));
     }
 
-    let help_items: Vec<(&str, &str)> = vec![
-        ("↑↓", "sel"),
-        ("↵", "login"),
-        ("b", "browse"),
-        ("e", "edit"),
-        ("a", "add"),
-        ("d", "del"),
-        ("s", "secrets"),
-        ("/", "search"),
-        ("q", "quit"),
-    ];
+    let help_items: Vec<(&str, &str)> = if state.search_focused {
+        vec![
+            ("Esc", "clear"),
+            ("↵", "commit"),
+            ("↑↓", "navigate"),
+        ]
+    } else if state.form.is_some() {
+        vec![
+            ("↑↓", "field"),
+            ("Tab", "next"),
+            ("S-Tab", "prev"),
+            ("↵", "save"),
+            ("Esc", "cancel"),
+        ]
+    } else if state.delete_confirm.is_some() {
+        vec![
+            ("y", "yes"),
+            ("n", "no"),
+            ("Esc", "cancel"),
+        ]
+    } else {
+        vec![
+            ("↑↓", "sel"),
+            ("↵", "login"),
+            ("b", "browse"),
+            ("e", "edit"),
+            ("a", "add"),
+            ("d", "del"),
+            ("s", "secrets"),
+            ("/", "search"),
+            ("q", "quit"),
+        ]
+    };
     let status_len: usize = status_spans.iter().map(|s| s.width()).sum();
-    let help_len: usize = help_items.iter().map(|(k, d)| 1 + k.len() + 1 + d.len() + 1).sum();
+    let help_len: usize = help_items.iter().map(|(k, d)| 1 + UnicodeWidthStr::width(*k) + 1 + d.len() + 2).sum();
     let w = area.width as usize;
-    let padding = if w > status_len + help_len + 4 { w - status_len - help_len - 4 } else { 0 };
+    let padding = w.saturating_sub(status_len + help_len + 1).max(1);
 
     status_spans.push(Span::raw(" ".repeat(padding)));
     for (key, desc) in &help_items {
-        status_spans.push(Span::styled(format!(" {} ", key), styles::status_key_style()));
-        status_spans.push(Span::styled(format!("{} ", desc), styles::status_desc_style()));
+        status_spans.push(Span::styled(format!("{}", key), styles::status_key_style()));
+        status_spans.push(Span::styled(format!(":{}  ", desc), styles::status_desc_style()));
     }
 
     let bottom_line = Line::from(status_spans);
@@ -469,6 +501,10 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
             state.form = None;
         }
         KeyCode::Up => {
+            form.error = None;
+            form.navigate_prev();
+        }
+        KeyCode::BackTab => {
             form.error = None;
             form.navigate_prev();
         }

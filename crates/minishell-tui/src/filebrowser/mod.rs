@@ -1108,12 +1108,18 @@ impl FileBrowserState {
             .split(chunks[0]);
 
         let host = self.machine.effective_host();
+        let path = self.active_panel().current_path.clone();
+        let breadcrumb = path.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" > ");
+
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
                 Span::styled("文件浏览器", styles::header_style()),
                 Span::styled(format!("  {}@{}:{}", self.machine.username, host, self.machine.port), styles::help_style()),
-                Span::styled(format!("  {}", self.active_panel().current_path.display()), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("  {}", breadcrumb), Style::default().fg(Color::DarkGray)),
             ])),
             header_lines[0],
         );
