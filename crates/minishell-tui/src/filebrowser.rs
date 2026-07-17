@@ -875,28 +875,22 @@ impl FileBrowserState {
             return;
         }
         let side = self.active_side;
-        let panel = self.active_panel();
-        let cursor = panel.cursor;
-        let entry = match panel.entries.get(cursor).cloned() {
-            Some(e) => e,
-            None => return,
+        let (entry, local_path, remote_path) = {
+            let p = self.active_panel();
+            let entry = match p.entries.get(p.cursor).cloned() {
+                Some(e) => e,
+                None => return,
+            };
+            if entry.name == ".." {
+                return;
+            }
+            (entry, self.local.current_path.clone(), self.remote.current_path.clone())
         };
-        if entry.name == ".." {
-            return;
-        }
         let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
         let type_label = if entry.is_dir { "[DIR]" } else { "[FILE]" };
         let (src_path, dst_path) = match side {
-            Side::Local => {
-                let src = self.local.current_path.join(&filename);
-                let dst = self.remote.current_path.join(&filename);
-                (src, dst)
-            }
-            Side::Remote => {
-                let src = self.remote.current_path.join(&filename);
-                let dst = self.local.current_path.join(&filename);
-                (src, dst)
-            }
+            Side::Local => (local_path.join(&filename), remote_path.join(&filename)),
+            Side::Remote => (remote_path.join(&filename), local_path.join(&filename)),
         };
         let direction_label = match side {
             Side::Local => "Push",
@@ -908,12 +902,7 @@ impl FileBrowserState {
         };
         self.status = format!(
             "{}:|{}|{}│{}|{}|{}",
-            direction_label,
-            type_label,
-            filename,
-            src_path.display(),
-            arrow,
-            dst_path.display()
+            direction_label, type_label, filename, src_path.display(), arrow, dst_path.display()
         );
         self.transfer_confirm = Some(side);
     }
@@ -928,16 +917,16 @@ impl FileBrowserState {
 
     fn start_delete(&mut self) {
         let side = self.active_side;
-        let (entry, cursor) = {
+        let (entry, cursor, full_path) = {
             let p = self.active_panel();
             let cursor = p.cursor;
-            match p.entries.get(cursor).cloned() {
-                Some(e) => (e, cursor),
+            let entry = match p.entries.get(cursor).cloned() {
+                Some(e) => e,
                 None => return,
-            }
+            };
+            let full_path = p.current_path.join(&entry.name);
+            (entry, cursor, full_path)
         };
-        let panel = self.active_panel();
-        let full_path = panel.current_path.join(&entry.name);
         let side_label = match side {
             Side::Local => "Local",
             Side::Remote => "Remote",
@@ -1236,15 +1225,8 @@ impl FileBrowserState {
                 } else {
                     self.status.clone()
                 }
-            } else if self.transfer_confirm.is_some() {
+            } else if self.transfer_confirm.is_some() || self.pending.is_some() {
                 self.status.clone()
-            } else if self.pending.is_some() && self.progress_total > 0 {
-                let pct = (self.progress_current * 100 / self.progress_total) as usize;
-                let bar_width = 20;
-                let filled = pct * bar_width / 100;
-                let empty = bar_width - filled;
-                let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty);
-                format!("{} {} {}%", self.progress_file_name, bar, pct)
             } else {
                 self.status.clone()
             };
@@ -1275,29 +1257,16 @@ impl FileBrowserState {
                         parts[1],
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ));
-                    // name│/full/path
-                    let name_and_path = parts[2];
-                    if let Some(p) = name_and_path.find('\u{2502}') {
-                        let name = &name_and_path[..p];
-                        let path = &name_and_path[p + '\u{2502}'.len_utf8()..];
-                        spans.push(Span::styled(
-                            format!(" {} ", name),
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::styled(
-                            "\u{2502} ",
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                        spans.push(Span::styled(
-                            format!("{}?", path),
-                            Style::default().fg(Color::Cyan),
-                        ));
-                    } else {
-                        spans.push(Span::styled(
-                            format!(" {}?", name_and_path),
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                        ));
+                    let name_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+                    let sep_style = Style::default().fg(Color::DarkGray);
+                    let path_style = Style::default().fg(Color::Cyan);
+                    let mut name_spans = render_name_and_path(parts[2], name_style, sep_style, path_style);
+                    // Append "?" to the last span (path)
+                    if let Some(last) = name_spans.last_mut() {
+                        let content = last.content.to_mut();
+                        content.push('?');
                     }
+                    spans.extend(name_spans);
                     spans.push(Span::styled(
                         format!(" ({})", parts[3]),
                         Style::default().fg(Color::DarkGray),
@@ -1309,45 +1278,25 @@ impl FileBrowserState {
                 // Format: "Push:|[DIR]|name│/src/path|->|/dst/path"
                 let parts: Vec<&str> = status_text.split('|').collect();
                 if parts.len() >= 5 {
-                    // Push:/Pull:
                     spans.push(Span::styled(
                         format!("{} ", parts[0]),
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     ));
-                    // [DIR]/[FILE]
                     spans.push(Span::styled(
                         parts[1],
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ));
-                    // filename│/src/path
-                    let name_and_src = parts[2];
-                    if let Some(p) = name_and_src.find('\u{2502}') {
-                        let name = &name_and_src[..p];
-                        let src = &name_and_src[p + '\u{2502}'.len_utf8()..];
-                        spans.push(Span::styled(
-                            format!(" {} ", name),
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::styled(
-                            "\u{2502} ",
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                        spans.push(Span::styled(
-                            src,
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    } else {
-                        spans.push(Span::styled(
-                            format!(" {} ", name_and_src),
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                        ));
-                    }
-                    // arrow
+                    let name_spans = render_name_and_path(
+                        parts[2],
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::DarkGray),
+                    );
+                    spans.extend(name_spans);
                     spans.push(Span::styled(
                         format!(" {} ", parts[3]),
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     ));
-                    // dst path
                     spans.push(Span::styled(
                         format!("{}?", parts[4]),
                         Style::default().fg(Color::Cyan),
@@ -1651,6 +1600,23 @@ impl FileBrowserState {
                 },
             );
         }
+    }
+}
+
+const PIPE_SEP: char = '\u{2502}'; // │
+
+fn render_name_and_path<'a>(text: &'a str, name_style: Style, sep_style: Style, path_style: Style) -> Vec<Span<'a>> {
+    match text.find(PIPE_SEP) {
+        Some(p) => {
+            let name = &text[..p];
+            let path = &text[p + PIPE_SEP.len_utf8()..];
+            vec![
+                Span::styled(format!(" {} ", name), name_style),
+                Span::styled(format!("{} ", PIPE_SEP), sep_style),
+                Span::styled(path, path_style),
+            ]
+        }
+        None => vec![Span::styled(format!(" {} ", text), name_style)],
     }
 }
 
