@@ -1,5 +1,6 @@
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use super::Side;
 
 pub struct TransferProgressState {
     pub file_name: String,

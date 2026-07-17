@@ -2,6 +2,28 @@ use std::path::PathBuf;
 use minishell_ssh::sftp::FileEntry;
 use super::tree::TreeEntry;
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum Side {
+    Local,
+    Remote,
+}
+
+impl Side {
+    pub fn other(self) -> Side {
+        match self {
+            Side::Local => Side::Remote,
+            Side::Remote => Side::Local,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Side::Local => "LOCAL",
+            Side::Remote => "REMOTE",
+        }
+    }
+}
+
 pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
@@ -54,5 +76,77 @@ impl PanelState {
                 self.scroll_offset = len.saturating_sub(visible_rows);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entries(n: usize) -> Vec<FileEntry> {
+        (0..n).map(|i| FileEntry {
+            name: format!("file{}", i),
+            is_dir: i % 2 == 0,
+            size: i as u64 * 100,
+            modified: String::new(),
+            perm: String::new(),
+        }).collect()
+    }
+
+    fn make_panel(n: usize) -> PanelState {
+        let mut panel = PanelState::new(PathBuf::from("/"));
+        panel.entries = make_entries(n);
+        panel.tree_entries = panel.entries.iter()
+            .map(|e| TreeEntry { entry: e.clone(), depth: 0 })
+            .collect();
+        panel
+    }
+
+    #[test]
+    fn test_cursor_move_down() {
+        let mut panel = make_panel(5);
+        assert_eq!(panel.cursor, 0);
+        panel.move_cursor(1, 10);
+        assert_eq!(panel.cursor, 1);
+    }
+
+    #[test]
+    fn test_cursor_move_up() {
+        let mut panel = make_panel(5);
+        panel.cursor = 3;
+        panel.move_cursor(-1, 10);
+        assert_eq!(panel.cursor, 2);
+    }
+
+    #[test]
+    fn test_cursor_bounds() {
+        let mut panel = make_panel(3);
+        panel.move_cursor(-1, 10);
+        assert_eq!(panel.cursor, 0);
+        panel.move_cursor(10, 10);
+        assert_eq!(panel.cursor, 2);
+    }
+
+    #[test]
+    fn test_empty_entries() {
+        let mut panel = PanelState::new(PathBuf::from("/"));
+        panel.move_cursor(1, 10);
+        assert_eq!(panel.cursor, 0);
+    }
+
+    #[test]
+    fn test_cursor_first() {
+        let mut panel = make_panel(5);
+        panel.cursor = 3;
+        panel.cursor_first();
+        assert_eq!(panel.cursor, 0);
+        assert_eq!(panel.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_cursor_last() {
+        let mut panel = make_panel(5);
+        panel.cursor_last(10);
+        assert_eq!(panel.cursor, 4);
     }
 }
