@@ -2,3 +2,6 @@
 name = "minishell-core"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+thiserror = "1"

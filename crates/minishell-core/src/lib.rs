@@ -1,3 +1,6 @@
+pub mod error;
+pub use error::{MinishellError, Result};
+
 pub const NOT_EXIST: &str = "-";
 
 #[derive(Debug, Clone)]
