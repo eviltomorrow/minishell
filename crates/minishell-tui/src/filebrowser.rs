@@ -898,11 +898,21 @@ impl FileBrowserState {
                 (src, dst)
             }
         };
+        let direction_label = match side {
+            Side::Local => "Upload",
+            Side::Remote => "Download",
+        };
+        let arrow = match side {
+            Side::Local => "\u{2550}\u{2550}\u{25B6}",  // ══▶
+            Side::Remote => "\u{25C0}\u{2550}\u{2550}",  // ◀══
+        };
         self.status = format!(
-            "Transfer {} {} {} → {}?",
+            "{} {} {} {} {} {}?",
+            direction_label,
             type_label,
             filename,
             src_path.display(),
+            arrow,
             dst_path.display()
         );
         self.transfer_confirm = Some(side);
@@ -1277,33 +1287,59 @@ impl FileBrowserState {
                     }
                 }
             } else if self.transfer_confirm.is_some() {
-                // Format: "Transfer [FILE] name /src/path → /dst/path?"
-                spans.push(Span::styled("Transfer ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-                if let Some(type_end) = status_text.find(']') {
-                    let type_part = &status_text[9..=type_end]; // "[FILE]" or "[DIR]"
-                    let rest = &status_text[type_end + 2..]; // after "] "
-                    spans.push(Span::styled(type_part, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-                    // Find " → " separator
-                    let arrow_sep = " \u{2192} ";
-                    if let Some(arrow_pos) = rest.find(arrow_sep) {
-                        let name_and_src = &rest[..arrow_pos];
-                        let dst_and_q = &rest[arrow_pos + arrow_sep.len()..];
-                        // Split name from src path (first space separates them)
-                        if let Some(space_pos) = name_and_src.find(' ') {
-                            let name = &name_and_src[..space_pos];
-                            let src = &name_and_src[space_pos + 1..];
-                            spans.push(Span::styled(format!("{} ", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
-                            spans.push(Span::styled(src, Style::default().fg(Color::DarkGray)));
+                // Format: "Upload [FILE] name /src/path ══▶ /dst/path?"
+                // or:     "Download [FILE] name /src/path ◀══ /dst/path?"
+                let is_upload = status_text.starts_with("Upload");
+                let action_word = if is_upload { "Upload" } else { "Download" };
+                let action_color = Color::Yellow;
+                spans.push(Span::styled(
+                    format!("{} ", action_word),
+                    Style::default().fg(action_color).add_modifier(Modifier::BOLD),
+                ));
+                // Find [FILE] or [DIR]
+                if let Some(type_start) = status_text.find('[') {
+                    if let Some(type_end) = status_text.find(']') {
+                        let type_part = &status_text[type_start..=type_end];
+                        spans.push(Span::styled(type_part, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                        let after_type = &status_text[type_end + 2..]; // "] "
+                        // Find the arrow
+                        let upload_arrow = "\u{2550}\u{2550}\u{25B6}"; // ══▶
+                        let download_arrow = "\u{25C0}\u{2550}\u{2550}"; // ◀══
+                        let (arrow_str, arrow_pos) = if let Some(pos) = after_type.find(upload_arrow) {
+                            (upload_arrow, pos)
+                        } else if let Some(pos) = after_type.find(download_arrow) {
+                            (download_arrow, pos)
                         } else {
-                            spans.push(Span::styled(name_and_src, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+                            ("", 0)
+                        };
+                        if !arrow_str.is_empty() {
+                            let before_arrow = &after_type[..arrow_pos];
+                            let after_arrow = &after_type[arrow_pos + arrow_str.len()..];
+                            // Split: "name /src/path"
+                            if let Some(space_pos) = before_arrow.find(' ') {
+                                let name = &before_arrow[..space_pos];
+                                let src = &before_arrow[space_pos + 1..];
+                                spans.push(Span::styled(format!("{} ", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+                                spans.push(Span::styled(src, Style::default().fg(Color::DarkGray)));
+                            } else {
+                                spans.push(Span::styled(before_arrow, Style::default().fg(Color::White)));
+                            }
+                            spans.push(Span::styled(
+                                format!(" {} ", arrow_str),
+                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                            ));
+                            // dst path (remove trailing "?")
+                            let dst = after_arrow.trim_end_matches('?');
+                            spans.push(Span::styled(dst, Style::default().fg(Color::Cyan)));
+                            spans.push(Span::styled("?", Style::default().fg(Color::DarkGray)));
+                        } else {
+                            spans.push(Span::styled(after_type, Style::default().fg(Color::White)));
                         }
-                        spans.push(Span::styled(" \u{2192} ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-                        spans.push(Span::styled(dst_and_q, Style::default().fg(Color::Cyan)));
                     } else {
-                        spans.push(Span::styled(rest, Style::default().fg(Color::White)));
+                        spans.push(Span::styled(&status_text[action_word.len() + 1..], Style::default().fg(Color::White)));
                     }
                 } else {
-                    spans.push(Span::styled(&status_text[9..], Style::default().fg(Color::Cyan)));
+                    spans.push(Span::styled(&status_text[action_word.len() + 1..], Style::default().fg(Color::White)));
                 }
             } else {
                 spans.push(Span::styled(&status_text, Style::default().fg(status_color)));
@@ -1415,50 +1451,12 @@ impl FileBrowserState {
             Style::default().fg(DIM)
         };
 
-        // Direction marker based on transfer state
-        let is_uploading = self.pending.is_some() && self.active_side == Side::Local;
-        let is_downloading = self.pending.is_some() && self.active_side == Side::Remote;
-        let is_upload_confirm = self.transfer_confirm == Some(Side::Local);
-        let is_download_confirm = self.transfer_confirm == Some(Side::Remote);
-        let transferring = is_uploading || is_downloading || is_upload_confirm || is_download_confirm;
-
-        let arrow_color = if is_uploading || is_downloading {
-            Color::Yellow
-        } else if is_upload_confirm || is_download_confirm {
-            Color::Yellow
-        } else {
-            Color::White
-        };
-
-        let (prefix, suffix) = if transferring {
-            let is_source = match side {
-                Side::Local => is_uploading || is_upload_confirm,
-                Side::Remote => is_downloading || is_download_confirm,
-            };
-            if is_source {
-                // Source panel: label →
-                ("", " → ")
-            } else {
-                // Destination panel: → label
-                ("→ ", "")
-            }
-        } else {
-            ("", " ")
-        };
-
-        let label = format!("{}{}{}", prefix, side.label(), suffix);
+        let label = format!(" {} ", side.label());
         let title = Line::from(vec![
-            Span::styled(
-                label,
-                if transferring {
-                    Style::default().fg(arrow_color).add_modifier(Modifier::BOLD)
-                } else {
-                    title_style
-                },
-            ),
+            Span::styled(label, title_style),
             Span::styled(
                 panel.current_path.display().to_string(),
-                if is_active || transferring {
+                if is_active {
                     Style::default().fg(Color::Cyan)
                 } else {
                     Style::default().fg(DIM)
