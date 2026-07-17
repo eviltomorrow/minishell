@@ -849,6 +849,7 @@ dependencies = [
  "minishell-core",
  "minishell-ssh",
  "minishell-store",
+ "minishell-utils",
  "ratatui",
  "ssh2",
  "unicode-width",
