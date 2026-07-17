@@ -195,4 +195,79 @@ mod tests {
         assert_eq!(store.count_all().unwrap(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn test_full_crud_flow() {
+        let (store, dir) = temp_store();
+        
+        // Create
+        let machines = vec![test_machine("10.0.0.1"), test_machine("10.0.0.2")];
+        let inserted = store.import_machines(&machines).unwrap();
+        assert_eq!(inserted, 2);
+        
+        // Read
+        let all = store.search("").unwrap();
+        assert_eq!(all.len(), 2);
+        
+        // Update
+        let mut m = all[0].clone();
+        m.remark = "updated".into();
+        store.update_machine(&m).unwrap();
+        
+        let updated = store.search("10.0.0.1").unwrap();
+        assert_eq!(updated[0].remark, "updated");
+        
+        // Delete
+        store.delete_machine(m.id).unwrap();
+        assert_eq!(store.search("").unwrap().len(), 1);
+        
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_search_by_remark() {
+        let (store, dir) = temp_store();
+        
+        let mut m1 = test_machine("10.0.0.1");
+        m1.remark = "web-server".into();
+        let mut m2 = test_machine("10.0.0.2");
+        m2.remark = "db-server".into();
+        
+        store.import_machines(&vec![m1, m2]).unwrap();
+        
+        let results = store.search("web").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].remark, "web-server");
+        
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_duplicate_ip_port_skipped() {
+        let (store, dir) = temp_store();
+        
+        let machines = vec![test_machine("10.0.0.1"), test_machine("10.0.0.1")];
+        let inserted = store.import_machines(&machines).unwrap();
+        assert_eq!(inserted, 1);
+        
+        let all = store.search("").unwrap();
+        assert_eq!(all.len(), 1);
+        
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_max_num() {
+        let (store, dir) = temp_store();
+        
+        assert_eq!(store.max_num().unwrap(), 0);
+        
+        let mut m = test_machine("10.0.0.1");
+        m.num = 5;
+        store.import_machines(&vec![m]).unwrap();
+        
+        assert_eq!(store.max_num().unwrap(), 5);
+        
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
