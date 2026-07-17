@@ -1352,10 +1352,6 @@ impl FileBrowserState {
                         format!("{}?", parts[4]),
                         Style::default().fg(Color::Cyan),
                     ));
-                    spans.push(Span::styled(
-                        format!("{}?", parts[5]),
-                        Style::default().fg(Color::Cyan),
-                    ));
                 } else {
                     spans.push(Span::styled(&status_text, Style::default().fg(Color::Yellow)));
                 }
