@@ -1181,15 +1181,20 @@ impl FileBrowserState {
             header_lines[1],
         );
 
-        // Split panels
+        // Split panels: local | arrow gutter | remote
         let panels = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+            .constraints([
+                Constraint::Min(10),
+                Constraint::Length(3),
+                Constraint::Min(10),
+            ])
             .split(chunks[1]);
 
         self.visible_rows = (chunks[1].height as usize).saturating_sub(4).max(1);
         self.render_panel(f, panels[0], Side::Local);
-        self.render_panel(f, panels[1], Side::Remote);
+        self.render_panel(f, panels[2], Side::Remote);
+        self.render_arrow(f, panels[1]);
 
         // Status + Help bar
         {
@@ -1550,6 +1555,45 @@ impl FileBrowserState {
                 },
             );
         }
+    }
+
+    fn render_arrow(&self, f: &mut Frame, area: Rect) {
+        use ratatui::widgets::Clear;
+
+        f.render_widget(Clear, area);
+
+        if area.height < 1 || area.width < 3 {
+            return;
+        }
+
+        let (symbol, color) = if self.pending.is_some() {
+            match self.active_side {
+                Side::Local => ("\u{2192}", Color::Yellow),
+                Side::Remote => ("\u{2190}", Color::Yellow),
+            }
+        } else if self.transfer_confirm.is_some() {
+            match self.transfer_confirm.unwrap() {
+                Side::Local => ("\u{2192}", Color::Green),
+                Side::Remote => ("\u{2190}", Color::Green),
+            }
+        } else {
+            ("\u{00B7}", Color::DarkGray)
+        };
+
+        let y = area.y + area.height / 2;
+        let x = area.x + 1;
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                symbol,
+                Style::default().fg(color),
+            ))),
+            Rect {
+                x,
+                y,
+                width: 1,
+                height: 1,
+            },
+        );
     }
 }
 
