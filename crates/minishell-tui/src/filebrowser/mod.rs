@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use minishell_core::Machine;
@@ -13,72 +13,13 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 use crate::styles;
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Side {
-    Local,
-    Remote,
-}
+pub mod types;
+pub mod panel;
+pub mod transfer;
 
-impl Side {
-    fn other(self) -> Side {
-        match self {
-            Side::Local => Side::Remote,
-            Side::Remote => Side::Local,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Side::Local => "LOCAL",
-            Side::Remote => "REMOTE",
-        }
-    }
-}
-
-struct TreeEntry {
-    entry: FileEntry,
-    depth: usize,
-}
-
-struct PanelState {
-    entries: Vec<FileEntry>,
-    cursor: usize,
-    scroll_offset: usize,
-    current_path: PathBuf,
-    prev_dir_name: Option<String>,
-    tree_entries: Vec<TreeEntry>,
-    expanded_dirs: Vec<PathBuf>,
-}
-
-impl PanelState {
-    fn new(path: PathBuf) -> Self {
-        PanelState {
-            entries: Vec::new(),
-            cursor: 0,
-            scroll_offset: 0,
-            current_path: path,
-            prev_dir_name: None,
-            tree_entries: Vec::new(),
-            expanded_dirs: Vec::new(),
-        }
-    }
-}
-
-struct TransferProgressState {
-    file_name: String,
-    bytes: u64,
-    total: u64,
-}
-
-enum ActionResult {
-    TransferDone(Side),
-    Error(String),
-}
-
-struct PendingTransfer {
-    progress: Arc<Mutex<TransferProgressState>>,
-    done_rx: Receiver<ActionResult>,
-}
+pub use types::{Side, TreeEntry};
+pub use panel::PanelState;
+pub use transfer::{TransferProgressState, ActionResult, PendingTransfer};
 
 pub struct FileBrowserState {
     machine: Machine,
