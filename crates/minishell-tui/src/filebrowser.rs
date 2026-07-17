@@ -1181,20 +1181,15 @@ impl FileBrowserState {
             header_lines[1],
         );
 
-        // Split panels: local | arrow gutter | remote
+        // Split panels
         let panels = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(10),
-                Constraint::Length(5),
-                Constraint::Min(10),
-            ])
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .split(chunks[1]);
 
         self.visible_rows = (chunks[1].height as usize).saturating_sub(4).max(1);
         self.render_panel(f, panels[0], Side::Local);
-        self.render_panel(f, panels[2], Side::Remote);
-        self.render_arrow(f, panels[1]);
+        self.render_panel(f, panels[1], Side::Remote);
 
         // Status + Help bar
         {
@@ -1393,11 +1388,50 @@ impl FileBrowserState {
             Style::default().fg(DIM)
         };
 
+        // Direction marker based on transfer state
+        let is_uploading = self.pending.is_some() && self.active_side == Side::Local;
+        let is_downloading = self.pending.is_some() && self.active_side == Side::Remote;
+        let is_upload_confirm = self.transfer_confirm == Some(Side::Local);
+        let is_download_confirm = self.transfer_confirm == Some(Side::Remote);
+        let transferring = is_uploading || is_downloading || is_upload_confirm || is_download_confirm;
+
+        let arrow_color = if is_uploading || is_downloading {
+            Color::Yellow
+        } else if is_upload_confirm || is_download_confirm {
+            Color::Green
+        } else {
+            Color::White
+        };
+
+        let (prefix, suffix) = if transferring {
+            let is_source = match side {
+                Side::Local => is_uploading || is_upload_confirm,
+                Side::Remote => is_downloading || is_download_confirm,
+            };
+            if is_source {
+                // Source panel: label →
+                ("", " → ")
+            } else {
+                // Destination panel: → label
+                ("→ ", "")
+            }
+        } else {
+            ("", " ")
+        };
+
+        let label = format!("{}{}{}", prefix, side.label(), suffix);
         let title = Line::from(vec![
-            Span::styled(format!(" {} ", side.label()), title_style),
+            Span::styled(
+                label,
+                if transferring {
+                    Style::default().fg(arrow_color).add_modifier(Modifier::BOLD)
+                } else {
+                    title_style
+                },
+            ),
             Span::styled(
                 panel.current_path.display().to_string(),
-                if is_active {
+                if is_active || transferring {
                     Style::default().fg(Color::Cyan)
                 } else {
                     Style::default().fg(DIM)
@@ -1578,35 +1612,6 @@ impl FileBrowserState {
                 },
             );
         }
-    }
-
-    fn render_arrow(&self, f: &mut Frame, area: Rect) {
-        use ratatui::widgets::Clear;
-        f.render_widget(Clear, area);
-        if area.height < 1 || area.width < 5 {
-            return;
-        }
-        let mid_y = area.y + area.height / 2;
-        let (symbol, color) = if self.pending.is_some() {
-            match self.active_side {
-                Side::Local => ("===> ", Color::Yellow),
-                Side::Remote => (" <===", Color::Yellow),
-            }
-        } else if self.transfer_confirm.is_some() {
-            match self.transfer_confirm.unwrap() {
-                Side::Local => ("===> ", Color::Green),
-                Side::Remote => (" <===", Color::Green),
-            }
-        } else {
-            ("  ·  ", Color::DarkGray)
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                symbol,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ))),
-            Rect { x: area.x, y: mid_y, width: area.width, height: 1 },
-        );
     }
 }
 
