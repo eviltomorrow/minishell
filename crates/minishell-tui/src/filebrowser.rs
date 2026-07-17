@@ -907,7 +907,7 @@ impl FileBrowserState {
             Side::Remote => "<-",
         };
         self.status = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}:|{}|{}│{}|{}|{}",
             direction_label,
             type_label,
             filename,
@@ -1291,10 +1291,10 @@ impl FileBrowserState {
                     spans.push(Span::styled(&status_text, Style::default().fg(Color::Red)));
                 }
             } else if self.transfer_confirm.is_some() {
-                // Format: "Upload|[DIR]|name|/src/path|->|/dst/path"
+                // Format: "Push:|[DIR]|name│/src/path|->|/dst/path"
                 let parts: Vec<&str> = status_text.split('|').collect();
-                if parts.len() >= 6 {
-                    // Upload/Download
+                if parts.len() >= 5 {
+                    // Push:/Pull:
                     spans.push(Span::styled(
                         format!("{} ", parts[0]),
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -1304,22 +1304,39 @@ impl FileBrowserState {
                         parts[1],
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ));
-                    // filename
-                    spans.push(Span::styled(
-                        format!(" {} ", parts[2]),
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                    ));
-                    // src path
-                    spans.push(Span::styled(
-                        parts[3],
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    // filename│/src/path
+                    let name_and_src = parts[2];
+                    if let Some(p) = name_and_src.find('\u{2502}') {
+                        let name = &name_and_src[..p];
+                        let src = &name_and_src[p + '\u{2502}'.len_utf8()..];
+                        spans.push(Span::styled(
+                            format!(" {} ", name),
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            "\u{2502} ",
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                        spans.push(Span::styled(
+                            src,
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            format!(" {} ", name_and_src),
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        ));
+                    }
                     // arrow
                     spans.push(Span::styled(
-                        format!(" {} ", parts[4]),
+                        format!(" {} ", parts[3]),
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     ));
                     // dst path
+                    spans.push(Span::styled(
+                        format!("{}?", parts[4]),
+                        Style::default().fg(Color::Cyan),
+                    ));
                     spans.push(Span::styled(
                         format!("{}?", parts[5]),
                         Style::default().fg(Color::Cyan),
