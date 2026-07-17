@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use minishell_core::Machine;
 use minishell_ssh::sftp::{self, FileEntry, format_modified, format_perm};
@@ -147,6 +148,13 @@ impl FileBrowserState {
         self.progress_total = 0;
     }
 
+    fn cancel_transfer(&mut self) {
+        if let Some(ref t) = self.pending {
+            t.cancel();
+        }
+        self.status = "Cancelling...".to_string();
+    }
+
     pub fn check_pending(&mut self) {
         if let Some(rx) = &self.pending_connect {
             match rx.try_recv() {
@@ -235,6 +243,11 @@ impl FileBrowserState {
                         self.process_next_transfer();
                     }
                 }
+            }
+            Ok(ActionResult::Aborted) => {
+                self.clear_transfer();
+                self.transfer_queue.clear();
+                self.status = "Transfer cancelled".to_string();
             }
             Err(TryRecvError::Empty) => {
                 if self.progress_total > 0 {
@@ -740,20 +753,20 @@ impl FileBrowserState {
         let dest_str = dest_path.to_string_lossy().to_string();
         let src_str = source_path.to_string_lossy().to_string();
 
-        let (tx, progress) = self.init_transfer(name.clone());
+        let (tx, progress, cancel) = self.init_transfer(name.clone());
 
         match source_side {
             Side::Local => {
                 if is_dir {
                     self.status = format!("Uploading {}/...", name);
-                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                         let cb = |p: &sftp::TransferProgress| {
                             let mut state = progress.lock().unwrap();
                             state.file_name = p.file_name.clone();
                             state.bytes = p.bytes_written;
                             state.total = p.total_bytes;
                         };
-                        let errors = sftp::upload_recursive(&sftp, &source_path, &dest_str, &cb);
+                        let errors = sftp::upload_recursive(&sftp, &source_path, &dest_str, &cb, &cancel);
                         match errors {
                             Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
                             Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
@@ -764,13 +777,13 @@ impl FileBrowserState {
                     let total_size = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
                     self.status = format!("Uploading {}...", name);
                     self.progress_total = total_size;
-                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                         let cb = |cur: u64, total: u64| {
                             let mut state = progress.lock().unwrap();
                             state.bytes = cur;
                             state.total = total;
                         };
-                        match sftp::upload_file(&sftp, &source_path, &dest_str, &cb) {
+                        match sftp::upload_file(&sftp, &source_path, &dest_str, &cb, &cancel) {
                             Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
                             Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
                         }
@@ -780,7 +793,7 @@ impl FileBrowserState {
             Side::Remote => {
                 if is_dir {
                     self.status = format!("Downloading {}/...", name);
-                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                         let _ = std::fs::create_dir_all(&dest_path);
                         let cb = |p: &sftp::TransferProgress| {
                             let mut state = progress.lock().unwrap();
@@ -788,7 +801,7 @@ impl FileBrowserState {
                             state.bytes = p.bytes_written;
                             state.total = p.total_bytes;
                         };
-                        let errors = sftp::download_recursive(&sftp, &src_str, &dest_path, &cb);
+                        let errors = sftp::download_recursive(&sftp, &src_str, &dest_path, &cb, &cancel);
                         match errors {
                             Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
                             Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
@@ -797,13 +810,13 @@ impl FileBrowserState {
                     });
                 } else {
                     self.status = format!("Downloading {}...", name);
-                    self.start_transfer(tx, progress, move |sftp, tx, progress| {
+                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                         let cb = |cur: u64, total: u64| {
                             let mut state = progress.lock().unwrap();
                             state.bytes = cur;
                             state.total = total;
                         };
-                        match sftp::download_file(&sftp, &src_str, &dest_path, &cb) {
+                        match sftp::download_file(&sftp, &src_str, &dest_path, &cb, &cancel) {
                             Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
                             Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
                         }
@@ -1120,7 +1133,8 @@ impl FileBrowserState {
         &self,
         tx: mpsc::Sender<ActionResult>,
         progress: Arc<Mutex<TransferProgressState>>,
-        f: impl FnOnce(ssh2::Sftp, mpsc::Sender<ActionResult>, Arc<Mutex<TransferProgressState>>) + Send + 'static,
+        cancel: Arc<AtomicBool>,
+        f: impl FnOnce(ssh2::Sftp, mpsc::Sender<ActionResult>, Arc<Mutex<TransferProgressState>>, Arc<AtomicBool>) + Send + 'static,
     ) {
         let config = self.build_config();
         thread::spawn(move || {
@@ -1138,22 +1152,23 @@ impl FileBrowserState {
                     return;
                 }
             };
-            f(sftp, tx, progress);
+            f(sftp, tx, progress, cancel);
         });
     }
 
-    fn init_transfer(&mut self, filename: String) -> (mpsc::Sender<ActionResult>, Arc<Mutex<TransferProgressState>>) {
+    fn init_transfer(&mut self, filename: String) -> (mpsc::Sender<ActionResult>, Arc<Mutex<TransferProgressState>>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel();
         let progress = Arc::new(Mutex::new(TransferProgressState {
             file_name: filename.clone(),
             bytes: 0,
             total: 0,
         }));
-        self.pending = Some(PendingTransfer { progress: progress.clone(), done_rx: rx });
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.pending = Some(PendingTransfer { progress: progress.clone(), done_rx: rx, cancel: cancel.clone() });
         self.progress_file_name = filename;
         self.progress_current = 0;
         self.progress_total = 0;
-        (tx, progress)
+        (tx, progress, cancel)
     }
 
     fn upload_selected(&mut self) {
@@ -1171,18 +1186,18 @@ impl FileBrowserState {
         let remote_str = remote_path.to_string_lossy().to_string();
         let is_dir = entry.is_dir;
 
-        let (tx, progress) = self.init_transfer(filename.clone());
+        let (tx, progress, cancel) = self.init_transfer(filename.clone());
 
         if is_dir {
             self.status = format!("Uploading {}/...", filename);
-            self.start_transfer(tx, progress, move |sftp, tx, progress| {
+            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                 let cb = |p: &sftp::TransferProgress| {
                     let mut state = progress.lock().unwrap();
                     state.file_name = p.file_name.clone();
                     state.bytes = p.bytes_written;
                     state.total = p.total_bytes;
                 };
-                let errors = sftp::upload_recursive(&sftp, &local_path, &remote_str, &cb);
+                let errors = sftp::upload_recursive(&sftp, &local_path, &remote_str, &cb, &cancel);
                 match errors {
                     Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
                     Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
@@ -1193,13 +1208,13 @@ impl FileBrowserState {
             let total_size = entry.size;
             self.status = format!("Uploading {}...", filename);
             self.progress_total = total_size;
-            self.start_transfer(tx, progress, move |sftp, tx, progress| {
+            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                 let cb = |cur: u64, total: u64| {
                     let mut state = progress.lock().unwrap();
                     state.bytes = cur;
                     state.total = total;
                 };
-                match sftp::upload_file(&sftp, &local_path, &remote_str, &cb) {
+                match sftp::upload_file(&sftp, &local_path, &remote_str, &cb, &cancel) {
                     Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
                     Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
                 }
@@ -1222,11 +1237,11 @@ impl FileBrowserState {
         let remote_str = remote_path.to_string_lossy().to_string();
         let is_dir = entry.is_dir;
 
-        let (tx, progress) = self.init_transfer(filename.clone());
+        let (tx, progress, cancel) = self.init_transfer(filename.clone());
 
         if is_dir {
             self.status = format!("Downloading {}/...", filename);
-            self.start_transfer(tx, progress, move |sftp, tx, progress| {
+            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                 let _ = std::fs::create_dir_all(&local_path);
                 let cb = |p: &sftp::TransferProgress| {
                     let mut state = progress.lock().unwrap();
@@ -1234,7 +1249,7 @@ impl FileBrowserState {
                     state.bytes = p.bytes_written;
                     state.total = p.total_bytes;
                 };
-                let errors = sftp::download_recursive(&sftp, &remote_str, &local_path, &cb);
+                let errors = sftp::download_recursive(&sftp, &remote_str, &local_path, &cb, &cancel);
                 match errors {
                     Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
                     Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
@@ -1245,13 +1260,13 @@ impl FileBrowserState {
             let total_size = entry.size;
             self.status = format!("Downloading {}...", filename);
             self.progress_total = total_size;
-            self.start_transfer(tx, progress, move |sftp, tx, progress| {
+            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
                 let cb = |cur: u64, total: u64| {
                     let mut state = progress.lock().unwrap();
                     state.bytes = cur;
                     state.total = total;
                 };
-                match sftp::download_file(&sftp, &remote_str, &local_path, &cb) {
+                match sftp::download_file(&sftp, &remote_str, &local_path, &cb, &cancel) {
                     Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
                     Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
                 }
@@ -1537,6 +1552,9 @@ impl FileBrowserState {
         }
 
         if self.pending.is_some() {
+            if key.code == KeyCode::Esc {
+                self.cancel_transfer();
+            }
             return;
         }
 

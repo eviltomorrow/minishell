@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, Context};
 pub use ssh2::Sftp;
 pub use minishell_utils::format_size;
@@ -53,6 +54,7 @@ pub fn upload_file(
     local_path: &Path,
     remote_path: &str,
     progress: &dyn Fn(u64, u64),
+    cancel: &AtomicBool,
 ) -> Result<()> {
     let mut local_file = std::fs::File::open(local_path)
         .with_context(|| format!("Failed to open local file '{}'", local_path.display()))?;
@@ -64,6 +66,9 @@ pub fn upload_file(
     let mut buf = [0u8; 65536];
     let mut written = 0u64;
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("Transfer cancelled"));
+        }
         let n = local_file.read(&mut buf)?;
         if n == 0 { break; }
         remote_file.write_all(&buf[..n])?;
@@ -80,6 +85,7 @@ pub fn download_file(
     remote_path: &str,
     local_path: &Path,
     progress: &dyn Fn(u64, u64),
+    cancel: &AtomicBool,
 ) -> Result<()> {
     let stat = sftp.stat(Path::new(remote_path))
         .with_context(|| format!("Failed to stat remote file '{}'", remote_path))?;
@@ -100,6 +106,9 @@ pub fn download_file(
     let mut buf = [0u8; 65536];
     let mut written = 0u64;
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("Transfer cancelled"));
+        }
         let n = remote_file.read(&mut buf)?;
         if n == 0 { break; }
         local_file.write_all(&buf[..n])?;
@@ -201,6 +210,7 @@ pub fn upload_recursive(
     local: &Path,
     remote: &str,
     progress: &dyn Fn(&TransferProgress),
+    cancel: &AtomicBool,
 ) -> Result<Vec<String>> {
     let mut errors = Vec::new();
 
@@ -230,6 +240,10 @@ pub fn upload_recursive(
     };
 
     for entry in entries {
+        if cancel.load(Ordering::SeqCst) {
+            errors.push("Transfer cancelled".to_string());
+            return Ok(errors);
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(e) => { errors.push(format!("entry: {}", e)); continue; }
@@ -239,7 +253,7 @@ pub fn upload_recursive(
         let remote_child = format!("{}/{}", remote.trim_end_matches('/'), entry_name);
 
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            let child_errors = upload_recursive(sftp, &local_child, &remote_child, progress)?;
+            let child_errors = upload_recursive(sftp, &local_child, &remote_child, progress, cancel)?;
             errors.extend(child_errors);
         } else {
             let meta = match entry.metadata() {
@@ -258,7 +272,7 @@ pub fn upload_recursive(
                     total_files: 0,
                 });
             };
-            if let Err(e) = upload_file(sftp, &local_child, &remote_child, &cb) {
+            if let Err(e) = upload_file(sftp, &local_child, &remote_child, &cb, cancel) {
                 errors.push(format!("{}: {}", entry_name, e));
                 continue;
             }
@@ -276,6 +290,7 @@ pub fn download_recursive(
     remote: &str,
     local: &Path,
     progress: &dyn Fn(&TransferProgress),
+    cancel: &AtomicBool,
 ) -> Result<Vec<String>> {
     let mut errors = Vec::new();
 
@@ -285,6 +300,10 @@ pub fn download_recursive(
     };
 
     for (path, stat) in entries {
+        if cancel.load(Ordering::SeqCst) {
+            errors.push("Transfer cancelled".to_string());
+            return Ok(errors);
+        }
         let name = match path.file_name() {
             Some(n) => n.to_string_lossy().to_string(),
             None => continue,
@@ -305,7 +324,7 @@ pub fn download_recursive(
                     errors.push(format!("perm {}: {}", name, e));
                 }
             }
-            let child_errors = download_recursive(sftp, &remote_child, &local_child, progress)?;
+            let child_errors = download_recursive(sftp, &remote_child, &local_child, progress, cancel)?;
             errors.extend(child_errors);
         } else if stat.is_file() {
             let total = stat.size.unwrap_or(0);
@@ -326,7 +345,7 @@ pub fn download_recursive(
                     continue;
                 }
             }
-            if let Err(e) = download_file(sftp, &remote_child, &local_child, &cb) {
+            if let Err(e) = download_file(sftp, &remote_child, &local_child, &cb, cancel) {
                 errors.push(format!("{}: {}", name, e));
                 continue;
             }
