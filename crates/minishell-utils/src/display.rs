@@ -19,16 +19,36 @@ pub fn format_size(size: u64) -> String {
     }
 }
 
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    let mut result = String::new();
+    let mut current_width = 0;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if current_width + cw > max_width {
+            break;
+        }
+        result.push(c);
+        current_width += cw;
+    }
+    result
+}
+
 pub fn pad_left(s: &str, width: usize) -> String {
-    todo!()
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        truncate_to_width(s, width)
+    } else {
+        format!("{}{}", " ".repeat(width - w), s)
+    }
 }
 
 pub fn pad_right(s: &str, width: usize) -> String {
-    todo!()
-}
-
-pub fn truncate_to_width(s: &str, max_width: usize) -> String {
-    todo!()
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        truncate_to_width(s, width)
+    } else {
+        format!("{}{}", s, " ".repeat(width - w))
+    }
 }
 
 #[cfg(test)]
@@ -55,5 +75,26 @@ mod tests {
     #[test]
     fn test_format_size_gb() {
         assert_eq!(format_size(1073741824), "1.00 G");
+    }
+
+    #[test]
+    fn test_pad_left() {
+        assert_eq!(pad_left("abc", 5), "  abc");
+        assert_eq!(pad_left("abcde", 3), "abc");
+        assert_eq!(pad_left("", 3), "   ");
+    }
+
+    #[test]
+    fn test_pad_right() {
+        assert_eq!(pad_right("abc", 5), "abc  ");
+        assert_eq!(pad_right("abcde", 3), "abc");
+        assert_eq!(pad_right("", 3), "   ");
+    }
+
+    #[test]
+    fn test_truncate_to_width() {
+        assert_eq!(truncate_to_width("hello", 3), "hel");
+        assert_eq!(truncate_to_width("hello", 10), "hello");
+        assert_eq!(truncate_to_width("", 5), "");
     }
 }
