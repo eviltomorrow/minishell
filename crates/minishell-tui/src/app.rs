@@ -201,9 +201,8 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     let sep2 = Line::from(vec![Span::styled("─".repeat(area.width as usize), styles::separator_style())]);
     f.render_widget(sep2, main_chunks[4]);
 
-    // Status + Help bar (single line, left-right split, aligned with table)
+    // Status + Help bar (single line, left-right split)
     let mut status_spans: Vec<Span> = vec![];
-    status_spans.push(Span::raw(" ")); // left padding to match table
     if let Some(m) = state.machines.get(state.table.cursor()) {
         status_spans.push(Span::styled(format!("{}/{}", state.table.cursor() + 1, state.machines.len()), styles::status_style()));
         status_spans.push(Span::styled(" │ ", styles::status_sep_style()));
@@ -256,9 +255,9 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
         ]
     };
     let status_len: usize = status_spans.iter().map(|s| s.width()).sum();
-    let help_len: usize = help_items.iter().map(|(k, d)| 1 + UnicodeWidthStr::width(*k) + 1 + d.len() + 2).sum();
+    let help_len: usize = help_items.iter().map(|(k, d)| UnicodeWidthStr::width(*k) + 1 + d.len() + 2).sum();
     let w = area.width as usize;
-    let padding = w.saturating_sub(status_len + help_len + 1).max(1);
+    let padding = w.saturating_sub(status_len + help_len);
 
     status_spans.push(Span::raw(" ".repeat(padding)));
     for (key, desc) in &help_items {

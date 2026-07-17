@@ -60,6 +60,4 @@ pub fn selected_style() -> Style {
     Style::default().fg(Color::White).add_modifier(Modifier::BOLD).bg(Color::Blue)
 }
 
-pub fn zebra_row_style() -> Style {
-    Style::default().bg(Color::Rgb(30, 30, 40))
-}
+

@@ -97,8 +97,6 @@ impl MachineTable {
         };
         let top = top.min(total_rows.saturating_sub(visible_height));
 
-        let zebra_style = super::styles::zebra_row_style();
-
         for i in 0..visible_height {
             let row_idx = top + i;
             if row_idx >= total_rows {
@@ -108,8 +106,6 @@ impl MachineTable {
             let y = area.y + 1 + i as u16;
             let style = if row_idx == self.cursor {
                 selected_style
-            } else if row_idx % 2 == 1 {
-                zebra_style
             } else {
                 normal_style
             };

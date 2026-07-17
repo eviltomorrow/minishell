@@ -1146,20 +1146,20 @@ impl FileBrowserState {
         {
             let is_transferring = self.pending.is_some();
             let (status_color, prefix) = if is_transferring {
-                (Color::Yellow, " \u{25B6} ")
+                (Color::Yellow, "\u{25B6}")
             } else if self.status.starts_with("Error")
                 || self.status.starts_with("Delete failed")
                 || self.status.starts_with("Upload failed")
                 || self.status.starts_with("Download failed")
             {
-                (STATUS_ERR, " \u{2717} ")
+                (STATUS_ERR, "\u{2717}")
             } else if self.status.starts_with("Transfer complete")
                 || self.status.starts_with("Deleted")
                 || self.status.starts_with("Renamed")
             {
-                (STATUS_OK, " \u{2713} ")
+                (STATUS_OK, "\u{2713}")
             } else {
-                (HINT, "   ")
+                (HINT, " ")
             };
 
             let status_text = if self.rename_input.is_some() {
