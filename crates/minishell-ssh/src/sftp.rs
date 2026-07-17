@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use anyhow::{Result, Context};
 pub use ssh2::Sftp;
+pub use minishell_utils::format_size;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -152,25 +153,6 @@ pub fn remove_recursive(sftp: &Sftp, path: &str) -> Result<Vec<String>> {
 pub fn rename_item(sftp: &Sftp, old_path: &str, new_path: &str) -> Result<()> {
     sftp.rename(Path::new(old_path), Path::new(new_path), None)
         .with_context(|| format!("Failed to rename '{}' to '{}'", old_path, new_path))
-}
-
-pub fn format_size(size: u64) -> String {
-    const UNITS: &[&str] = &["B", "K", "M", "G", "T"];
-    let mut s = size as f64;
-    let mut unit_idx = 0;
-    while s >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        s /= 1024.0;
-        unit_idx += 1;
-    }
-    if unit_idx == 0 {
-        format!("{} B", size)
-    } else if s >= 100.0 {
-        format!("{:.0} {}", s, UNITS[unit_idx])
-    } else if s >= 10.0 {
-        format!("{:.1} {}", s, UNITS[unit_idx])
-    } else {
-        format!("{:.2} {}", s, UNITS[unit_idx])
-    }
 }
 
 pub fn mkdir_p(sftp: &Sftp, path: &str) -> Result<()> {
