@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/minishell-core",
+    "crates/minishell-utils",
     "crates/minishell-store",
     "crates/minishell-ssh",
     "crates/minishell-tui",
@@ -16,6 +17,7 @@ license = "MIT"
 
 [workspace.dependencies]
 minishell-core = { path = "crates/minishell-core" }
+minishell-utils = { path = "crates/minishell-utils" }
 minishell-store = { path = "crates/minishell-store" }
 minishell-ssh = { path = "crates/minishell-ssh" }
 minishell-tui = { path = "crates/minishell-tui" }
