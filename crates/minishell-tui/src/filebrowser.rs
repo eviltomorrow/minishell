@@ -870,6 +870,38 @@ impl FileBrowserState {
         }
     }
 
+    fn start_transfer_confirm(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
+        let side = self.active_side;
+        let panel = self.active_panel();
+        let cursor = panel.cursor;
+        let entry = match panel.entries.get(cursor).cloned() {
+            Some(e) => e,
+            None => return,
+        };
+        if entry.name == ".." {
+            return;
+        }
+        let filename = entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string();
+        let type_label = if entry.is_dir { "[DIR]" } else { "[FILE]" };
+        let direction = match side {
+            Side::Local => "\u{2192} remote",
+            Side::Remote => "\u{2190} local",
+        };
+        self.status = format!("Transfer {} {} {}?", type_label, filename, direction);
+        self.transfer_confirm = Some(side);
+    }
+
+    fn confirm_transfer(&mut self) {
+        let side = self.transfer_confirm.take().unwrap_or(self.active_side);
+        match side {
+            Side::Local => self.upload_selected(),
+            Side::Remote => self.download_selected(),
+        }
+    }
+
     fn start_delete(&mut self) {
         let side = self.active_side;
         let (entry, cursor) = {
@@ -1069,13 +1101,25 @@ impl FileBrowserState {
             return;
         }
 
+        if self.transfer_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_transfer(),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.transfer_confirm = None;
+                    self.status = "Transfer cancelled".to_string();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.pending.is_some() {
             return;
         }
 
         if !self.active_panel().expanded_dirs.is_empty() {
             match key.code {
-                KeyCode::Char('u') | KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Char('r') => {
+                KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Char('r') => {
                     return;
                 }
                 _ => {}
@@ -1092,9 +1136,8 @@ impl FileBrowserState {
             KeyCode::Tab => self.toggle_side(),
             KeyCode::Char('/') => self.goto_root(),
             KeyCode::Char('~') => self.goto_home(),
-            KeyCode::Char('u') => self.upload_selected(),
-            KeyCode::Char('d') => self.download_selected(),
-            KeyCode::Char('x') => self.start_delete(),
+            KeyCode::Char('x') => self.start_transfer_confirm(),
+            KeyCode::Char('d') => self.start_delete(),
             KeyCode::Char('r') => self.start_rename(),
             KeyCode::Char('t') => self.toggle_tree(),
             _ => {}
