@@ -907,7 +907,7 @@ impl FileBrowserState {
             Side::Remote => "<-",
         };
         self.status = format!(
-            "{} {} {} {} {} {}?",
+            "{}|{}|{}|{}|{}|{}",
             direction_label,
             type_label,
             filename,
@@ -1287,57 +1287,41 @@ impl FileBrowserState {
                     }
                 }
             } else if self.transfer_confirm.is_some() {
-                // Format: "Upload [FILE] name /src/path ══▶ /dst/path?"
-                // or:     "Download [FILE] name /src/path ◀══ /dst/path?"
-                let is_upload = status_text.starts_with("Upload");
-                let action_word = if is_upload { "Upload" } else { "Download" };
-                let action_color = Color::Yellow;
-                spans.push(Span::styled(
-                    format!("{} ", action_word),
-                    Style::default().fg(action_color).add_modifier(Modifier::BOLD),
-                ));
-                // Find [FILE] or [DIR]
-                if let Some(type_start) = status_text.find('[') {
-                    if let Some(type_end) = status_text.find(']') {
-                        let type_part = &status_text[type_start..=type_end];
-                        spans.push(Span::styled(type_part, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-                        let after_type = &status_text[type_end + 2..]; // "] "
-                        // Find the arrow
-                        let (arrow_str, arrow_pos) = if let Some(pos) = after_type.find(" -> ") {
-                            ("->", pos)
-                        } else if let Some(pos) = after_type.find(" <- ") {
-                            ("<-", pos)
-                        } else {
-                            ("", 0)
-                        };
-                        if !arrow_str.is_empty() {
-                            let before_arrow = &after_type[..arrow_pos];
-                            let after_arrow = &after_type[arrow_pos + arrow_str.len()..];
-                            // Split: "name /src/path"
-                            if let Some(space_pos) = before_arrow.find(' ') {
-                                let name = &before_arrow[..space_pos];
-                                let src = &before_arrow[space_pos + 1..];
-                                spans.push(Span::styled(format!("{} ", name), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
-                                spans.push(Span::styled(src, Style::default().fg(Color::DarkGray)));
-                            } else {
-                                spans.push(Span::styled(before_arrow, Style::default().fg(Color::White)));
-                            }
-                            spans.push(Span::styled(
-                                format!(" {} ", arrow_str),
-                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                            ));
-                            // dst path (remove trailing "?")
-                            let dst = after_arrow.trim_end_matches('?');
-                            spans.push(Span::styled(dst, Style::default().fg(Color::Cyan)));
-                            spans.push(Span::styled("?", Style::default().fg(Color::DarkGray)));
-                        } else {
-                            spans.push(Span::styled(after_type, Style::default().fg(Color::White)));
-                        }
-                    } else {
-                        spans.push(Span::styled(&status_text[action_word.len() + 1..], Style::default().fg(Color::White)));
-                    }
+                // Format: "Upload|[DIR]|name|/src/path|->|/dst/path"
+                let parts: Vec<&str> = status_text.split('|').collect();
+                if parts.len() >= 6 {
+                    // Upload/Download
+                    spans.push(Span::styled(
+                        format!("{} ", parts[0]),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ));
+                    // [DIR]/[FILE]
+                    spans.push(Span::styled(
+                        parts[1],
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ));
+                    // filename
+                    spans.push(Span::styled(
+                        format!(" {} ", parts[2]),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ));
+                    // src path
+                    spans.push(Span::styled(
+                        parts[3],
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    // arrow
+                    spans.push(Span::styled(
+                        format!(" {} ", parts[4]),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ));
+                    // dst path
+                    spans.push(Span::styled(
+                        format!("{}?", parts[5]),
+                        Style::default().fg(Color::Cyan),
+                    ));
                 } else {
-                    spans.push(Span::styled(&status_text[action_word.len() + 1..], Style::default().fg(Color::White)));
+                    spans.push(Span::styled(&status_text, Style::default().fg(Color::Yellow)));
                 }
             } else {
                 spans.push(Span::styled(&status_text, Style::default().fg(status_color)));
