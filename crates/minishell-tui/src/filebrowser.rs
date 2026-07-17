@@ -570,7 +570,7 @@ impl FileBrowserState {
             let mut need = depth;
             for i in (0..p.cursor).rev() {
                 let prev = &p.tree_entries[i];
-                if prev.depth == need - 1 {
+                if need > 0 && prev.depth == need - 1 {
                     new_expanded.push(Self::tree_entry_full_path(p, i));
                     need = prev.depth;
                     if need == 0 { break; }
