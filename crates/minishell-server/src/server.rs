@@ -2,6 +2,8 @@ use russh::server::{self, Auth, Session, Msg, ChannelOpenHandle};
 use russh::{Channel, ChannelId, Pty};
 use crate::config::ServerConfig;
 use crate::shell::PtySession;
+use crate::sftp::SftpHandler;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -23,6 +25,7 @@ impl server::Server for MinishellServer {
         ClientHandler {
             config: self.config.clone(),
             pty_session: None,
+            session_channel: None,
             channel_id: None,
             authenticated: false,
             username: String::new(),
@@ -36,6 +39,7 @@ impl server::Server for MinishellServer {
 pub struct ClientHandler {
     config: Arc<ServerConfig>,
     pty_session: Option<PtySession>,
+    session_channel: Option<Channel<Msg>>,
     channel_id: Option<ChannelId>,
     authenticated: bool,
     username: String,
@@ -86,7 +90,9 @@ impl server::Handler for ClientHandler {
 
     async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: ChannelOpenHandle, _session: &mut Session) -> Result<(), Self::Error> {
         let _ = reply.accept().await;
-        self.channel_id = Some(channel.id());
+        let id = channel.id();
+        self.session_channel = Some(channel);
+        self.channel_id = Some(id);
         Ok(())
     }
 
@@ -194,11 +200,19 @@ impl server::Handler for ClientHandler {
         Ok(())
     }
 
-    async fn subsystem_request(&mut self, channel: ChannelId, name: &str, session: &mut Session) -> Result<(), Self::Error> {
+    async fn subsystem_request(&mut self, channel_id: ChannelId, name: &str, session: &mut Session) -> Result<(), Self::Error> {
         if name == "sftp" && self.authenticated {
-            let _ = session.channel_success(channel);
+            if let Some(channel) = self.session_channel.take() {
+                let _ = session.channel_success(channel_id);
+                let stream = channel.into_stream();
+                let handler = SftpHandler::new(PathBuf::from("/"));
+                tokio::spawn(async move {
+                    russh_sftp::server::run(stream, handler).await;
+                    tracing::debug!("SFTP session ended");
+                });
+            }
         } else {
-            let _ = session.channel_failure(channel);
+            let _ = session.channel_failure(channel_id);
         }
         Ok(())
     }
