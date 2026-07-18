@@ -13,6 +13,7 @@ impl PtySession {
     pub fn spawn(username: &str, term: &str, cols: u16, rows: u16, home_dir: &PathBuf) -> anyhow::Result<Self> {
         let shell = get_shell();
         let shell_cstr = CString::new(shell.clone())?;
+        let arg_l = CString::new("-l")?;
         let arg_i = CString::new("-i")?;
 
         let winsize = libc::winsize {
@@ -46,7 +47,7 @@ impl PtySession {
             std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
             let _ = std::env::set_current_dir(home_dir);
 
-            let argv = [shell_cstr.as_ptr(), arg_i.as_ptr(), std::ptr::null()];
+            let argv = [shell_cstr.as_ptr(), arg_l.as_ptr(), arg_i.as_ptr(), std::ptr::null()];
             unsafe {
                 libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
                 // If execvp returns, it failed
