@@ -44,7 +44,13 @@ impl PtySession {
             std::env::set_var("TERM", term);
             std::env::set_var("SHELL", &shell);
             std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
-            let _ = std::env::set_current_dir(&home);
+
+            // Ensure home directory exists and is writable
+            std::fs::create_dir_all(&home).ok();
+            if std::env::set_current_dir(&home).is_err() {
+                let _ = std::env::set_current_dir("/tmp");
+                std::env::set_var("HOME", "/tmp");
+            }
 
             let argv = [shell_cstr.as_ptr(), arg_i.as_ptr(), std::ptr::null()];
             unsafe {
