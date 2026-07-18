@@ -89,6 +89,12 @@ impl server::Handler for ClientHandler {
     }
 
     async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: ChannelOpenHandle, _session: &mut Session) -> Result<(), Self::Error> {
+        // Only support one session channel per connection
+        if self.channel_id.is_some() {
+            tracing::warn!("Rejecting second session channel");
+            let _ = reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
+            return Ok(());
+        }
         let _ = reply.accept().await;
         let id = channel.id();
         self.session_channel = Some(channel);
@@ -196,6 +202,7 @@ impl server::Handler for ClientHandler {
     }
 
     async fn exec_request(&mut self, channel: ChannelId, _data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        tracing::debug!("exec_request rejected (not supported)");
         let _ = session.channel_failure(channel);
         Ok(())
     }
@@ -237,20 +244,41 @@ impl server::Handler for ClientHandler {
 
     async fn data(&mut self, _channel: ChannelId, data: &[u8], _session: &mut Session) -> Result<(), Self::Error> {
         if let Some(ref pty) = self.pty_session {
-            unsafe {
-                libc::write(pty.master_fd, data.as_ptr() as *const libc::c_void, data.len());
-            }
+            let fd = pty.master_fd;
+            let data = data.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let mut written = 0;
+                while written < data.len() {
+                    let n = unsafe {
+                        libc::write(fd, data[written..].as_ptr() as *const libc::c_void, data.len() - written)
+                    };
+                    if n < 0 {
+                        let err = std::io::Error::last_os_error();
+                        if err.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        break;
+                    }
+                    written += n as usize;
+                }
+            }).await.ok();
         }
         Ok(())
     }
 
-    async fn channel_close(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
-        self.pty_session = None;
+    async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
+        if Some(channel) == self.channel_id {
+            self.pty_session = None;
+            self.channel_id = None;
+        }
         Ok(())
     }
 
-    async fn channel_eof(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
-        self.pty_session = None;
+    async fn channel_eof(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
+        if Some(channel) == self.channel_id {
+            self.pty_session = None;
+            self.channel_id = None;
+        }
         Ok(())
     }
 }
@@ -264,12 +292,19 @@ impl ClientHandler {
                     for line in keys_content.lines() {
                         let line = line.trim();
                         if line.is_empty() || line.starts_with('#') { continue; }
-                        if let Ok(authorized_key) = russh::keys::parse_public_key_base64(line) {
+                        // authorized_keys format: "ssh-ed25519 AAAAC3NzaC... comment"
+                        // parse_public_key_base64 expects only the base64 part
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        let key_str = if parts.len() >= 2 { parts[1] } else { parts[0] };
+                        if let Ok(authorized_key) = russh::keys::parse_public_key_base64(key_str) {
                             if authorized_key == *public_key {
                                 return true;
                             }
                         }
                     }
+                    tracing::warn!("Public key for user '{}' not found in authorized_keys", user);
+                } else {
+                    tracing::warn!("Could not read authorized_keys file '{}'", keys_path.display());
                 }
             }
         }

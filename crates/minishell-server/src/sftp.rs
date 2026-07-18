@@ -4,14 +4,38 @@ use russh_sftp::server::StatusReply;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::fs;
-use tokio::fs as async_fs;
 use std::os::unix::fs::PermissionsExt;
+
+fn fail(e: impl std::fmt::Display) -> StatusReply {
+    StatusReply {
+        status_code: StatusCode::Failure,
+        error_message: Some(e.to_string()),
+        language_tag: None,
+    }
+}
+
+fn no_such_file(e: impl std::fmt::Display) -> StatusReply {
+    StatusReply {
+        status_code: StatusCode::NoSuchFile,
+        error_message: Some(e.to_string()),
+        language_tag: None,
+    }
+}
+
+fn ok_status(id: u32) -> Status {
+    Status {
+        id,
+        status_code: StatusCode::Ok,
+        error_message: String::new(),
+        language_tag: String::new(),
+    }
+}
 
 #[derive(Debug)]
 pub struct SftpHandler {
     root: PathBuf,
     open_dirs: HashMap<String, Vec<File>>,
-    open_files: HashMap<String, async_fs::File>,
+    open_files: HashMap<String, std::fs::File>,
     next_handle: u64,
 }
 
@@ -92,75 +116,60 @@ impl Handler for SftpHandler {
         let path = self.resolve_path(&filename);
         let handle = self.next_handle();
 
-        let file = if pflags.contains(OpenFlags::CREATE) || pflags.contains(OpenFlags::TRUNCATE) {
-            async_fs::File::create(&path).await
-        } else {
-            async_fs::File::open(&path).await
-        };
-
-        match file {
+        // Use the proper From<OpenFlags> conversion to handle all flag combinations
+        let opts: fs::OpenOptions = pflags.into();
+        match opts.open(&path) {
             Ok(f) => {
                 self.open_files.insert(handle.clone(), f);
                 Ok(Handle { id, handle })
             }
-            Err(_) => Err(StatusReply::from(StatusCode::NoSuchFile))
+            Err(e) => Err(no_such_file(e))
         }
     }
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         self.open_files.remove(&handle);
         self.open_dirs.remove(&handle);
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        Ok(ok_status(id))
     }
 
     async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, Self::Error> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        use std::io::{Read, Seek, SeekFrom};
 
         let file = self.open_files.get_mut(&handle).ok_or_else(|| StatusReply::from(StatusCode::NoSuchFile))?;
 
-        file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|_| StatusReply::from(StatusCode::Failure))?;
+        file.seek(SeekFrom::Start(offset)).map_err(|e| fail(e))?;
 
         let mut buf = vec![0u8; len as usize];
-        let n = file.read(&mut buf).await.map_err(|_| StatusReply::from(StatusCode::Failure))?;
+        let n = file.read(&mut buf).map_err(|e| fail(e))?;
         buf.truncate(n);
 
         Ok(Data { id, data: buf })
     }
 
     async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> Result<Status, Self::Error> {
-        use tokio::io::{AsyncWriteExt, AsyncSeekExt};
+        use std::io::{Write, Seek, SeekFrom};
 
         let file = self.open_files.get_mut(&handle).ok_or_else(|| StatusReply::from(StatusCode::NoSuchFile))?;
 
-        file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|_| StatusReply::from(StatusCode::Failure))?;
+        file.seek(SeekFrom::Start(offset)).map_err(|e| fail(e))?;
+        file.write_all(&data).map_err(|e| fail(e))?;
 
-        file.write_all(&data).await.map_err(|_| StatusReply::from(StatusCode::Failure))?;
-
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        Ok(ok_status(id))
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         let dir_path = self.resolve_path(&path);
         let handle = self.next_handle();
 
-        let entries = fs::read_dir(&dir_path).map_err(|_| StatusReply::from(StatusCode::NoSuchFile))?;
+        let entries = fs::read_dir(&dir_path).map_err(|e| no_such_file(e))?;
 
         let mut items = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|_| StatusReply::from(StatusCode::Failure))?;
+            let entry = entry.map_err(|e| fail(e))?;
             let name = entry.file_name().to_string_lossy().to_string();
             if name == "." || name == ".." { continue; }
-            let metadata = entry.metadata().map_err(|_| StatusReply::from(StatusCode::Failure))?;
+            let metadata = entry.metadata().map_err(|e| fail(e))?;
             items.push(Self::make_file(name, &metadata));
         }
 
@@ -182,96 +191,80 @@ impl Handler for SftpHandler {
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         let full_path = self.resolve_path(&path);
-        let metadata = fs::symlink_metadata(&full_path).map_err(|_| StatusReply::from(StatusCode::NoSuchFile))?;
+        let metadata = fs::symlink_metadata(&full_path).map_err(|e| no_such_file(e))?;
         Ok(Attrs { id, attrs: Self::file_attrs(&metadata) })
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         let full_path = self.resolve_path(&path);
-        let metadata = fs::metadata(&full_path).map_err(|_| StatusReply::from(StatusCode::NoSuchFile))?;
+        let metadata = fs::metadata(&full_path).map_err(|e| no_such_file(e))?;
         Ok(Attrs { id, attrs: Self::file_attrs(&metadata) })
     }
 
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
         let file = self.open_files.get(&handle).ok_or_else(|| StatusReply::from(StatusCode::NoSuchFile))?;
-        let metadata = file.metadata().await.map_err(|_| StatusReply::from(StatusCode::Failure))?;
+        let metadata = file.metadata().map_err(|e| fail(e))?;
         Ok(Attrs { id, attrs: Self::file_attrs(&metadata) })
     }
 
     async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
         let full_path = self.resolve_path(&path);
         if let Some(perm) = attrs.permissions {
-            fs::set_permissions(&full_path, fs::Permissions::from_mode(perm)).map_err(|_| StatusReply::from(StatusCode::Failure))?;
+            fs::set_permissions(&full_path, fs::Permissions::from_mode(perm)).map_err(|e| fail(e))?;
         }
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        Ok(ok_status(id))
     }
 
     async fn fsetstat(&mut self, id: u32, handle: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
         let file = self.open_files.get(&handle).ok_or_else(|| StatusReply::from(StatusCode::NoSuchFile))?;
         if let Some(perm) = attrs.permissions {
-            file.set_permissions(fs::Permissions::from_mode(perm)).await.map_err(|_| StatusReply::from(StatusCode::Failure))?;
+            file.set_permissions(fs::Permissions::from_mode(perm)).map_err(|e| fail(e))?;
         }
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        Ok(ok_status(id))
     }
 
     async fn mkdir(&mut self, id: u32, path: String, _attrs: FileAttributes) -> Result<Status, Self::Error> {
         let full_path = self.resolve_path(&path);
-        fs::create_dir(&full_path).map_err(|_| StatusReply::from(StatusCode::Failure))?;
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        fs::create_dir(&full_path).map_err(|e| fail(e))?;
+        Ok(ok_status(id))
     }
 
     async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
         let full_path = self.resolve_path(&path);
-        fs::remove_dir(&full_path).map_err(|_| StatusReply::from(StatusCode::Failure))?;
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        fs::remove_dir(&full_path).map_err(|e| fail(e))?;
+        Ok(ok_status(id))
     }
 
     async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
         let full_path = self.resolve_path(&filename);
-        fs::remove_file(&full_path).map_err(|_| StatusReply::from(StatusCode::Failure))?;
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        fs::remove_file(&full_path).map_err(|e| fail(e))?;
+        Ok(ok_status(id))
     }
 
     async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
         let old = self.resolve_path(&oldpath);
         let new = self.resolve_path(&newpath);
-        fs::rename(&old, &new).map_err(|_| StatusReply::from(StatusCode::Failure))?;
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        fs::rename(&old, &new).map_err(|e| fail(e))?;
+        Ok(ok_status(id))
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
         let full_path = self.resolve_path(&path);
-        let canonical = fs::canonicalize(&full_path).map_err(|_| StatusReply::from(StatusCode::NoSuchFile))?;
+        let canonical = fs::canonicalize(&full_path).or_else(|_| {
+            // Path may not exist yet (e.g., client resolving destination for upload)
+            // Try canonicalizing parent and appending filename
+            if let Some(parent) = full_path.parent() {
+                if parent.as_os_str().is_empty() {
+                    return Ok(PathBuf::from("/"));
+                }
+                if let Ok(canon_parent) = fs::canonicalize(parent) {
+                    if let Some(file_name) = full_path.file_name() {
+                        return Ok(canon_parent.join(file_name));
+                    }
+                }
+            }
+            Err(StatusReply::from(StatusCode::NoSuchFile))
+        })?;
         Ok(Name {
             id,
             files: vec![File {
@@ -284,7 +277,7 @@ impl Handler for SftpHandler {
 
     async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
         let full_path = self.resolve_path(&path);
-        let target = fs::read_link(&full_path).map_err(|_| StatusReply::from(StatusCode::NoSuchFile))?;
+        let target = fs::read_link(&full_path).map_err(|e| no_such_file(e))?;
         Ok(Name {
             id,
             files: vec![File {
@@ -298,12 +291,7 @@ impl Handler for SftpHandler {
     async fn symlink(&mut self, id: u32, linkpath: String, targetpath: String) -> Result<Status, Self::Error> {
         let link = self.resolve_path(&linkpath);
         let target = self.resolve_path(&targetpath);
-        std::os::unix::fs::symlink(&target, &link).map_err(|_| StatusReply::from(StatusCode::Failure))?;
-        Ok(Status {
-            id,
-            status_code: StatusCode::Ok,
-            error_message: "".to_string(),
-            language_tag: "".to_string(),
-        })
+        std::os::unix::fs::symlink(&target, &link).map_err(|e| fail(e))?;
+        Ok(ok_status(id))
     }
 }
