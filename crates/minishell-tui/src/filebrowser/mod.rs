@@ -248,6 +248,7 @@ impl FileBrowserState {
                 self.clear_transfer();
                 self.transfer_queue.clear();
                 self.status = "Transfer cancelled".to_string();
+                self.init_dirs();
             }
             Err(TryRecvError::Empty) => {
                 if self.progress_total > 0 {
