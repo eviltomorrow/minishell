@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::path::PathBuf;
+use russh::keys::PrivateKey;
 
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
@@ -122,6 +123,39 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+pub fn load_or_generate_host_key(path: &std::path::Path) -> anyhow::Result<PrivateKey> {
+    if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        let key_pair = russh::keys::decode_secret_key(&content, None)?;
+        tracing::info!("Loaded host key from {}", path.display());
+        return Ok(key_pair);
+    }
+
+    // Generate new Ed25519 key
+    let mut rng = russh::keys::key::safe_rng();
+    let key_pair = PrivateKey::random(&mut rng, russh::keys::Algorithm::Ed25519)
+        .map_err(|e| anyhow::anyhow!("Failed to generate Ed25519 key: {}", e))?;
+
+    // Save to file
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut buf = Vec::new();
+    russh::keys::encode_pkcs8_pem(&key_pair, &mut buf)?;
+    let key_str = String::from_utf8_lossy(&buf);
+    std::fs::write(path, key_str.as_ref())?;
+
+    // Set restrictive permissions (owner only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    tracing::info!("Generated new Ed25519 host key at {}", path.display());
+    Ok(key_pair)
 }
 
 #[cfg(test)]
