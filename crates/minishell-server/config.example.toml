@@ -1,16 +1,22 @@
 [server]
-bind = "0.0.0.0"
-port = 2222
-max_connections = 50
-session_timeout = 3600
+bind = "0.0.0.0"          # 监听地址，默认 "0.0.0.0"
+port = 2222                # 监听端口，默认 2222
+max_connections = 50       # 最大连接数，默认 50
+session_timeout = 3600     # 会话超时秒数，默认 3600
 
 [host_key]
-path = "~/.config/minishell-server/host_key"
+path = "~/.config/minishell-server/host_key"  # 主机密钥路径，默认 ~/.config/minishell-server/host_key
 
 [auth]
 [[auth.users]]
-username = "admin"
-password = "admin"
+username = "admin"         # 用户名（必填）
+password = "admin"         # 密码（可选）
+authorized_keys = "~/.ssh/authorized_keys"  # 公钥文件路径（可选）
+home_dir = "/home/admin"   # 用户 home 目录（可选，不填则查系统数据库或自动创建）
+
+[[auth.users]]
+username = "deploy"        # 第二个用户示例
+authorized_keys = "~/.ssh/deploy_authorized_keys"  # 仅密钥登录，无密码
 
 [log]
-level = "debug"
+level = "info"             # 日志级别，默认 "info"
