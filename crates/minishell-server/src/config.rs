@@ -97,10 +97,19 @@ pub fn default_config_path() -> String {
 }
 
 pub fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read config '{}': {}", path, e))?;
+    let preferred = dirs::home_dir()
+        .map(|h| h.join(".config/minishell-server/config.toml"))
+        .filter(|p| p.exists());
+
+    let config_path = preferred
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read config '{}': {}", config_path, e))?;
     let config: ServerConfig = toml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse config '{}': {}", path, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse config '{}': {}", config_path, e))?;
     Ok(config)
 }
 
