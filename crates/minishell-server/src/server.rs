@@ -3,6 +3,7 @@ use russh::{Channel, ChannelId, Pty};
 use crate::config::ServerConfig;
 use crate::shell::PtySession;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 pub struct MinishellServer {
     config: Arc<ServerConfig>,
@@ -22,6 +23,7 @@ impl server::Server for MinishellServer {
         ClientHandler {
             config: self.config.clone(),
             pty_session: None,
+            pty_rx: None,
             channel_id: None,
             authenticated: false,
             username: String::new(),
@@ -35,6 +37,7 @@ impl server::Server for MinishellServer {
 pub struct ClientHandler {
     config: Arc<ServerConfig>,
     pty_session: Option<PtySession>,
+    pty_rx: Option<mpsc::Receiver<Vec<u8>>>,
     channel_id: Option<ChannelId>,
     authenticated: bool,
     username: String,
@@ -115,7 +118,47 @@ impl server::Handler for ClientHandler {
 
         match PtySession::spawn(&self.username, &self.term, self.cols, self.rows) {
             Ok(pty) => {
+                let master_fd = pty.master_fd;
                 self.pty_session = Some(pty);
+
+                // Spawn background task to read PTY output
+                let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
+                self.pty_rx = Some(rx);
+
+                tokio::task::spawn_blocking(move || {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let mut pollfds = [libc::pollfd {
+                            fd: master_fd,
+                            events: libc::POLLIN,
+                            revents: 0,
+                        }];
+                        let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), 1, 100) };
+                        if ret < 0 {
+                            break;
+                        }
+                        if ret > 0 && pollfds[0].revents & libc::POLLIN != 0 {
+                            let n = unsafe {
+                                libc::read(
+                                    master_fd,
+                                    buf.as_mut_ptr() as *mut libc::c_void,
+                                    buf.len(),
+                                )
+                            };
+                            if n <= 0 {
+                                break;
+                            }
+                            if tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        // Check if PTY fd is closed (POLLHUP)
+                        if pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                            break;
+                        }
+                    }
+                });
+
                 let _ = session.channel_success(channel);
             }
             Err(e) => {
@@ -158,22 +201,33 @@ impl server::Handler for ClientHandler {
         Ok(())
     }
 
-    async fn data(&mut self, _channel: ChannelId, data: &[u8], _session: &mut Session) -> Result<(), Self::Error> {
+    async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        // Write user input to PTY
         if let Some(ref pty) = self.pty_session {
             unsafe {
                 libc::write(pty.master_fd, data.as_ptr() as *const libc::c_void, data.len());
             }
         }
+
+        // Drain PTY output and send back to client
+        if let Some(ref mut rx) = self.pty_rx {
+            while let Ok(output) = rx.try_recv() {
+                let _ = session.data(channel, output);
+            }
+        }
+
         Ok(())
     }
 
     async fn channel_close(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
         self.pty_session = None;
+        self.pty_rx = None;
         Ok(())
     }
 
     async fn channel_eof(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
         self.pty_session = None;
+        self.pty_rx = None;
         Ok(())
     }
 }

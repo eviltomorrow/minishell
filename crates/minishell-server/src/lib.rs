@@ -28,7 +28,7 @@ pub async fn run_server(config_path: &str) -> anyhow::Result<()> {
     // Create russh config
     let russh_config = russh::server::Config {
         keys: host_keys,
-        auth_rejection_time: std::time::Duration::from_secs(3),
+        auth_rejection_time: std::time::Duration::from_millis(100),
         ..Default::default()
     };
 
