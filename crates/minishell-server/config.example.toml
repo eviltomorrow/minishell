@@ -1,0 +1,16 @@
+[server]
+bind = "0.0.0.0"
+port = 2222
+max_connections = 50
+session_timeout = 3600
+
+[host_key]
+path = "~/.config/minishell-server/host_key"
+
+[auth]
+[[auth.users]]
+username = "admin"
+password = "change-me"
+
+[log]
+level = "info"
