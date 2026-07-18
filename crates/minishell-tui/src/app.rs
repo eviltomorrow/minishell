@@ -382,7 +382,7 @@ fn render_delete_confirm(f: &mut ratatui::Frame, area: Rect, target: &Machine) {
         Span::styled("Esc", styles::key_style()),
         Span::styled(" cancel", styles::help_style()),
     ]);
-    f.render_widget(hints, Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 });
+    f.render_widget(hints, Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 });
 }
 
 fn update(state: &mut AppState, key: KeyEvent) {
