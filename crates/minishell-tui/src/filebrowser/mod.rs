@@ -1569,7 +1569,11 @@ impl FileBrowserState {
             KeyCode::Tab => self.toggle_side(),
             KeyCode::Char('/') => self.goto_root(),
             KeyCode::Char('~') => self.goto_home(),
-            KeyCode::Char('x') => self.start_transfer_confirm(),
+            KeyCode::Char('x') => {
+                if self.clipboard.is_empty() {
+                    self.start_transfer_confirm();
+                }
+            }
             KeyCode::Char('d') => self.start_delete(),
             KeyCode::Char('r') => self.start_rename(),
             KeyCode::Char('t') => self.toggle_tree(),
@@ -1797,7 +1801,7 @@ impl FileBrowserState {
                     Span::styled(":close", styles::help_style()),
                 ]
             } else if !self.active_panel().expanded_dirs.is_empty() {
-                vec![
+                let mut hints = vec![
                     Span::styled("Tab", styles::key_style()),
                     Span::styled(":panel  ", styles::help_style()),
                     Span::styled("\u{2191}\u{2193}", styles::key_style()),
@@ -1808,8 +1812,14 @@ impl FileBrowserState {
                     Span::styled(":back  ", styles::help_style()),
                     Span::styled("y", styles::key_style()),
                     Span::styled(":copy  ", styles::help_style()),
-                    Span::styled("x", styles::key_style()),
-                    Span::styled(":transfer  ", styles::help_style()),
+                    Span::styled("v", styles::key_style()),
+                    Span::styled(":view  ", styles::help_style()),
+                ];
+                if self.clipboard.is_empty() {
+                    hints.push(Span::styled("x", styles::key_style()));
+                    hints.push(Span::styled(":transfer  ", styles::help_style()));
+                }
+                hints.extend([
                     Span::styled("d", styles::key_style()),
                     Span::styled(":del  ", styles::help_style()),
                     Span::styled("r", styles::key_style()),
@@ -1818,9 +1828,10 @@ impl FileBrowserState {
                     Span::styled(":tree  ", styles::help_style()),
                     Span::styled("q", styles::key_style()),
                     Span::styled(":quit", styles::help_style()),
-                ]
+                ]);
+                hints
             } else {
-                vec![
+                let mut hints = vec![
                     Span::styled("Tab", styles::key_style()),
                     Span::styled(":panel  ", styles::help_style()),
                     Span::styled("\u{2191}\u{2193}", styles::key_style()),
@@ -1835,8 +1846,12 @@ impl FileBrowserState {
                     Span::styled(":view  ", styles::help_style()),
                     Span::styled("p", styles::key_style()),
                     Span::styled(":paste  ", styles::help_style()),
-                    Span::styled("x", styles::key_style()),
-                    Span::styled(":transfer  ", styles::help_style()),
+                ];
+                if self.clipboard.is_empty() {
+                    hints.push(Span::styled("x", styles::key_style()));
+                    hints.push(Span::styled(":transfer  ", styles::help_style()));
+                }
+                hints.extend([
                     Span::styled("d", styles::key_style()),
                     Span::styled(":del  ", styles::help_style()),
                     Span::styled("r", styles::key_style()),
@@ -1845,7 +1860,8 @@ impl FileBrowserState {
                     Span::styled(":tree  ", styles::help_style()),
                     Span::styled("q", styles::key_style()),
                     Span::styled(":quit", styles::help_style()),
-                ]
+                ]);
+                hints
             };
 
             let w = area.width as usize;
