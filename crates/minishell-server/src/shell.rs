@@ -2,6 +2,7 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag};
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
+use std::path::PathBuf;
 
 pub struct PtySession {
     pub master_fd: RawFd,
@@ -9,7 +10,7 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    pub fn spawn(username: &str, term: &str, cols: u16, rows: u16) -> anyhow::Result<Self> {
+    pub fn spawn(username: &str, term: &str, cols: u16, rows: u16, home_dir: &PathBuf) -> anyhow::Result<Self> {
         let shell = get_shell();
         let shell_cstr = CString::new(shell.clone())?;
         let arg_i = CString::new("-i")?;
@@ -38,19 +39,12 @@ impl PtySession {
 
         if pid == 0 {
             // Child
-            let home = get_home(username);
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", home_dir.to_string_lossy().as_ref());
             std::env::set_var("USER", username);
             std::env::set_var("TERM", term);
             std::env::set_var("SHELL", &shell);
             std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
-
-            // Ensure home directory exists and is writable
-            std::fs::create_dir_all(&home).ok();
-            if std::env::set_current_dir(&home).is_err() {
-                let _ = std::env::set_current_dir("/tmp");
-                std::env::set_var("HOME", "/tmp");
-            }
+            let _ = std::env::set_current_dir(home_dir);
 
             let argv = [shell_cstr.as_ptr(), arg_i.as_ptr(), std::ptr::null()];
             unsafe {
@@ -108,11 +102,4 @@ fn get_shell() -> String {
         return "/bin/bash".to_string();
     }
     "/bin/sh".to_string()
-}
-
-fn get_home(username: &str) -> String {
-    if username == "root" {
-        return "/root".to_string();
-    }
-    format!("/home/{}", username)
 }

@@ -126,7 +126,9 @@ impl server::Handler for ClientHandler {
             return Ok(());
         }
 
-        match PtySession::spawn(&self.username, &self.term, self.cols, self.rows) {
+        let user_config = self.config.find_user(&self.username);
+        let home_dir = crate::config::resolve_home_dir(&self.username, user_config);
+        match PtySession::spawn(&self.username, &self.term, self.cols, self.rows, &home_dir) {
             Ok(pty) => {
                 let master_fd = pty.master_fd;
                 self.pty_session = Some(pty);

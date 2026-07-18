@@ -10,7 +10,7 @@ path = "~/.config/minishell-server/host_key"
 [auth]
 [[auth.users]]
 username = "admin"
-password = "change-me"
+password = "admin"
 
 [log]
-level = "info"
+level = "debug"

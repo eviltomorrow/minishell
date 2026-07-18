@@ -46,6 +46,8 @@ pub struct UserConfig {
     pub password: Option<String>,
     #[serde(default)]
     pub authorized_keys: Option<String>,
+    #[serde(default)]
+    pub home_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +116,71 @@ impl ServerConfig {
     pub fn expanded_authorized_keys_path(&self, user: &UserConfig) -> Option<PathBuf> {
         user.authorized_keys.as_ref().map(|p| expand_tilde(p))
     }
+}
+
+pub fn resolve_home_dir(username: &str, user_config: Option<&UserConfig>) -> PathBuf {
+    // 1. Config explicitly configured home_dir
+    if let Some(cfg) = user_config {
+        if let Some(home) = &cfg.home_dir {
+            let expanded = expand_tilde(home);
+            if expanded.is_absolute() {
+                return expanded;
+            }
+        }
+    }
+
+    // 2. System user database (getpwnam_r)
+    if let Some(system_home) = lookup_system_home(username) {
+        return system_home;
+    }
+
+    // 3. Auto-create /home/<username>
+    let default_home = if username == "root" {
+        PathBuf::from("/root")
+    } else {
+        PathBuf::from("/home").join(username)
+    };
+
+    // Attempt to create it
+    std::fs::create_dir_all(&default_home).ok();
+
+    // 4. Fall back to /tmp if creation failed
+    if default_home.exists() {
+        default_home
+    } else {
+        PathBuf::from("/tmp")
+    }
+}
+
+fn lookup_system_home(username: &str) -> Option<PathBuf> {
+    // Buffer size for getpwnam_r (suggested: 4096 should be enough for any system)
+    let mut buf = vec![0u8; 4096];
+    let mut passwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    let c_username = std::ffi::CString::new(username).ok()?;
+
+    let ret = unsafe {
+        libc::getpwnam_r(
+            c_username.as_ptr(),
+            passwd.as_mut_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+
+    if ret != 0 || result.is_null() {
+        return None;
+    }
+
+    let pw = unsafe { &*result };
+    if pw.pw_dir.is_null() {
+        return None;
+    }
+
+    let home = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) };
+    Some(PathBuf::from(home.to_string_lossy().as_ref()))
 }
 
 pub fn expand_tilde(path: &str) -> PathBuf {
