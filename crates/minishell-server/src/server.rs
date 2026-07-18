@@ -127,6 +127,7 @@ impl server::Handler for ClientHandler {
 
                 // Task 1: Blocking PTY reader (runs on blocking thread pool)
                 tokio::task::spawn_blocking(move || {
+                    tracing::debug!("PTY reader started for fd={}", master_fd);
                     let mut buf = [0u8; 4096];
                     loop {
                         let mut pollfds = [libc::pollfd {
@@ -136,6 +137,7 @@ impl server::Handler for ClientHandler {
                         }];
                         let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), 1, 100) };
                         if ret < 0 {
+                            tracing::debug!("PTY poll error");
                             break;
                         }
                         if ret > 0 && pollfds[0].revents & libc::POLLIN != 0 {
@@ -147,14 +149,17 @@ impl server::Handler for ClientHandler {
                                 )
                             };
                             if n <= 0 {
+                                tracing::debug!("PTY read EOF");
                                 break;
                             }
-                            // Send to async task - if channel closed, stop
+                            tracing::debug!("PTY read {} bytes", n);
                             if tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
+                                tracing::debug!("PTY channel closed");
                                 break;
                             }
                         }
                         if pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                            tracing::debug!("PTY HUP/ERR");
                             break;
                         }
                     }
@@ -162,11 +167,15 @@ impl server::Handler for ClientHandler {
 
                 // Task 2: Async sender (runs on tokio runtime)
                 tokio::spawn(async move {
+                    tracing::debug!("PTY async sender started for channel {:?}", channel);
                     while let Some(data) = rx.recv().await {
+                        tracing::debug!("Sending {} bytes to SSH channel", data.len());
                         if handle.data(channel, data).await.is_err() {
+                            tracing::debug!("Handle::data failed");
                             break;
                         }
                     }
+                    tracing::debug!("PTY async sender stopped");
                 });
 
                 let _ = session.channel_success(channel);
