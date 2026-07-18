@@ -171,11 +171,12 @@ impl server::Handler for ClientHandler {
                     while let Some(data) = rx.recv().await {
                         tracing::debug!("Sending {} bytes to SSH channel", data.len());
                         if handle.data(channel, data).await.is_err() {
-                            tracing::debug!("Handle::data failed");
                             break;
                         }
                     }
-                    tracing::debug!("PTY async sender stopped");
+                    tracing::debug!("Shell exited, closing channel {:?}", channel);
+                    let _ = handle.eof(channel).await;
+                    let _ = handle.close(channel).await;
                 });
 
                 let _ = session.channel_success(channel);
