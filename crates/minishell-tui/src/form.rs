@@ -107,6 +107,7 @@ pub struct FormState {
     pub step: usize,
     pub is_edit: bool,
     pub target_id: Option<i64>,
+    pub num: i32,
     pub error: Option<String>,
 }
 
@@ -116,7 +117,7 @@ impl FormState {
             .map(|(label, max_len, width)| FormField::new(label, *max_len, *width))
             .collect();
         fields[6] = FormField::new_select("Device:", vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()]);
-        FormState { fields, step: 0, is_edit: false, target_id: None, error: None }
+        FormState { fields, step: 0, is_edit: false, target_id: None, num: 0, error: None }
     }
 
     pub fn new_edit(machine: &Machine) -> Self {
@@ -151,7 +152,7 @@ impl FormState {
             })
             .collect();
 
-        FormState { fields, step: 0, is_edit: true, target_id: Some(machine.id), error: None }
+        FormState { fields, step: 0, is_edit: true, target_id: Some(machine.id), num: machine.num, error: None }
     }
 
     pub fn navigate_next(&mut self) {
@@ -209,7 +210,7 @@ impl FormState {
 
         Machine {
             id: self.target_id.unwrap_or(0),
-            num: 0,
+            num: self.num,
             ip: or_dash(&self.fields[0].value),
             nat_ip: or_dash(&self.fields[1].value),
             port,

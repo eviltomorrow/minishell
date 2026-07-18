@@ -518,11 +518,11 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
                     form.error = Some(err.to_string());
                 } else {
                     form.error = None;
-                    let mut machine = form.to_machine();
+                    form.num = state.store.count_all().unwrap_or(0) as i32 + 1;
+                    let machine = form.to_machine();
                     let result = if form.is_edit {
                         state.store.update_machine(&machine).map_err(|e| e)
                     } else {
-                        machine.num = state.store.max_num().unwrap_or(0) + 1;
                         state.store.import_machines(&[machine]).map(|_| ())
                     };
                     match result {
