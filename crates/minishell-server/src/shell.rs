@@ -1,9 +1,7 @@
-use nix::pty::openpty;
-use nix::unistd::{fork, ForkResult, setsid, execvp};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag};
 use std::ffi::CString;
-use std::os::unix::io::{RawFd, AsRawFd};
+use std::os::unix::io::RawFd;
 
 pub struct PtySession {
     pub master_fd: RawFd,
@@ -12,75 +10,54 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn spawn(username: &str, term: &str, cols: u16, rows: u16) -> anyhow::Result<Self> {
-        let pty = openpty(None, None)?;
+        let shell = get_shell();
+        let shell_cstr = CString::new(shell.clone())?;
+        let arg_i = CString::new("-i")?;
 
-        let master_fd = pty.master.as_raw_fd();
-        let slave_fd = pty.slave.as_raw_fd();
-
-        // Set initial window size
         let winsize = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        unsafe {
-            libc::ioctl(master_fd, libc::TIOCSWINSZ, &winsize);
-        }
 
-        let child_pid = match unsafe { fork()? } {
-            ForkResult::Child => {
-                // Create new session
-                setsid()?;
+        let mut master: libc::c_int = 0;
 
-                // Set controlling terminal
-                unsafe {
-                    libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
-                }
-
-                // Redirect stdin/stdout/stderr to slave
-                unsafe {
-                    libc::dup2(slave_fd, libc::STDIN_FILENO);
-                    libc::dup2(slave_fd, libc::STDOUT_FILENO);
-                    libc::dup2(slave_fd, libc::STDERR_FILENO);
-                }
-
-                // Close original slave fd
-                if slave_fd > 2 {
-                    unsafe { libc::close(slave_fd); }
-                }
-                unsafe { libc::close(master_fd); }
-
-                // Set environment
-                let home = get_home(username);
-                std::env::set_var("HOME", &home);
-                std::env::set_var("USER", username);
-                std::env::set_var("TERM", term);
-                std::env::set_var("SHELL", get_shell());
-                std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
-
-                // Change to home directory
-                let _ = std::env::set_current_dir(&home);
-
-                // Exec shell
-                let shell = get_shell();
-                let shell_cstr = CString::new(shell.clone())?;
-                let arg = CString::new("-i")?;
-                execvp(&shell_cstr, &[shell_cstr.clone(), arg])?;
-
-                // execvp doesn't return on success
-                std::process::exit(1);
-            }
-            ForkResult::Parent { child } => {
-                // Close slave fd in parent
-                drop(pty.slave);
-                child
-            }
+        let pid = unsafe {
+            libc::forkpty(
+                &mut master as *mut libc::c_int,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &winsize as *const libc::winsize,
+            )
         };
 
+        if pid < 0 {
+            anyhow::bail!("forkpty failed: {}", std::io::Error::last_os_error());
+        }
+
+        if pid == 0 {
+            // Child
+            let home = get_home(username);
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USER", username);
+            std::env::set_var("TERM", term);
+            std::env::set_var("SHELL", &shell);
+            std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
+            let _ = std::env::set_current_dir(&home);
+
+            let argv = [shell_cstr.as_ptr(), arg_i.as_ptr(), std::ptr::null()];
+            unsafe {
+                libc::execvp(shell_cstr.as_ptr(), argv.as_ptr());
+                // If execvp returns, it failed
+                std::process::exit(1);
+            }
+        }
+
+        // Parent
         Ok(PtySession {
-            master_fd,
-            child_pid,
+            master_fd: master,
+            child_pid: nix::unistd::Pid::from_raw(pid),
         })
     }
 
