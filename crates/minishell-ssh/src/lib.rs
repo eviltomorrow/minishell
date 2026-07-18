@@ -4,9 +4,16 @@ pub mod sftp;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use anyhow::{Result, Context};
 use minishell_core::Machine;
+
+static RESIZE_FLAG: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigwinch(_: i32) {
+    RESIZE_FLAG.store(true, Ordering::SeqCst);
+}
 
 #[derive(Clone)]
 pub struct ConnectConfig {
@@ -39,6 +46,13 @@ fn run_session_loop(channel: &mut ssh2::Channel, session_fd: RawFd) -> SessionEn
             return SessionEnd::Normal;
         }
 
+        // Handle terminal resize
+        if RESIZE_FLAG.swap(false, Ordering::SeqCst) {
+            if let Ok((cols, rows)) = crossterm::terminal::size() {
+                let _ = channel.request_pty_size(cols as u32, rows as u32, None, None);
+            }
+        }
+
         let mut pollfds = [
             libc::pollfd { fd: stdin_fd, events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: session_fd, events: libc::POLLIN, revents: 0 },
@@ -48,6 +62,7 @@ fn run_session_loop(channel: &mut ssh2::Channel, session_fd: RawFd) -> SessionEn
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
+                // poll was interrupted (e.g. by SIGWINCH) — re-enter loop to handle resize
                 continue;
             }
             return SessionEnd::Disconnected;
@@ -91,6 +106,11 @@ fn run_session_loop(channel: &mut ssh2::Channel, session_fd: RawFd) -> SessionEn
 
 pub fn connect(config: &ConnectConfig) -> Result<()> {
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+
+    // Install SIGWINCH handler for terminal resize notifications
+    unsafe {
+        libc::signal(libc::SIGWINCH, handle_sigwinch as *const () as libc::sighandler_t);
+    }
 
     let _ = crossterm::terminal::enable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
@@ -145,42 +165,55 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
 
 pub fn create_session(config: &ConnectConfig) -> Result<ssh2::Session> {
     let addr = format!("{}:{}", config.host, config.port);
-    let parsed_addr: std::net::SocketAddr = match addr.parse() {
-        Ok(addr) => addr,
+    let addrs: Vec<std::net::SocketAddr> = match addr.parse() {
+        Ok(addr) => vec![addr],
         Err(_) => addr
             .to_socket_addrs()
             .context("Failed to resolve hostname")?
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No addresses found for hostname"))?,
+            .collect(),
     };
 
-    let tcp = TcpStream::connect_timeout(&parsed_addr, config.timeout)
-        .with_context(|| format!("Failed to connect to {}:{}", config.host, config.port))?;
-
-    let mut session = ssh2::Session::new().context("Failed to create SSH session")?;
-    session.set_tcp_stream(tcp);
-    session.handshake().context("SSH handshake failed")?;
-
-    if !config.private_key_path.is_empty() {
-        let key_path = std::path::Path::new(&config.private_key_path);
-        session
-            .userauth_pubkey_file(&config.username, None, key_path, None)
-            .context("Public key auth failed")?;
-    } else if !config.password.is_empty() {
-        session
-            .userauth_password(&config.username, &config.password)
-            .context("Password auth failed")?;
-    } else {
-        session
-            .userauth_agent(&config.username)
-            .context("Agent auth failed")?;
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses resolved for {}", config.host);
     }
 
-    if !session.authenticated() {
-        anyhow::bail!("Authentication failed");
+    let mut last_err = anyhow::anyhow!("Failed to connect");
+    for parsed_addr in &addrs {
+        match TcpStream::connect_timeout(parsed_addr, config.timeout) {
+            Ok(tcp) => {
+                let mut session = ssh2::Session::new().context("Failed to create SSH session")?;
+                session.set_tcp_stream(tcp);
+                session.handshake().context("SSH handshake failed")?;
+
+                if !config.private_key_path.is_empty() {
+                    let key_path = std::path::Path::new(&config.private_key_path);
+                    session
+                        .userauth_pubkey_file(&config.username, None, key_path, None)
+                        .context("Public key auth failed")?;
+                } else if !config.password.is_empty() {
+                    session
+                        .userauth_password(&config.username, &config.password)
+                        .context("Password auth failed")?;
+                } else {
+                    session
+                        .userauth_agent(&config.username)
+                        .context("Agent auth failed")?;
+                }
+
+                if !session.authenticated() {
+                    anyhow::bail!("Authentication failed");
+                }
+
+                return Ok(session);
+            }
+            Err(e) => {
+                last_err = anyhow::anyhow!("Failed to connect to {}: {}", parsed_addr, e);
+                continue;
+            }
+        }
     }
 
-    Ok(session)
+    Err(last_err)
 }
 
 fn try_session(
