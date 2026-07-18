@@ -3,6 +3,7 @@ use russh::{Channel, ChannelId, Pty};
 use crate::config::ServerConfig;
 use crate::shell::PtySession;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 pub struct MinishellServer {
     config: Arc<ServerConfig>,
@@ -118,10 +119,13 @@ impl server::Handler for ClientHandler {
                 let master_fd = pty.master_fd;
                 self.pty_session = Some(pty);
 
-                // Get a Handle to send data from outside the handler
+                // Get a Handle for sending data from async task
                 let handle = session.handle();
 
-                // Spawn background task: PTY output → SSH channel
+                // Channel: blocking PTY reader → async sender
+                let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1024);
+
+                // Task 1: Blocking PTY reader (runs on blocking thread pool)
                 tokio::task::spawn_blocking(move || {
                     let mut buf = [0u8; 4096];
                     loop {
@@ -145,12 +149,21 @@ impl server::Handler for ClientHandler {
                             if n <= 0 {
                                 break;
                             }
-                            let data = buf[..n as usize].to_vec();
-                            // Use Handle to send data - blocks until runtime accepts
-                            let rt = tokio::runtime::Handle::current();
-                            let _ = rt.block_on(handle.data(channel, data));
+                            // Send to async task - if channel closed, stop
+                            if tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
+                                break;
+                            }
                         }
                         if pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                            break;
+                        }
+                    }
+                });
+
+                // Task 2: Async sender (runs on tokio runtime)
+                tokio::spawn(async move {
+                    while let Some(data) = rx.recv().await {
+                        if handle.data(channel, data).await.is_err() {
                             break;
                         }
                     }
@@ -199,7 +212,6 @@ impl server::Handler for ClientHandler {
     }
 
     async fn data(&mut self, _channel: ChannelId, data: &[u8], _session: &mut Session) -> Result<(), Self::Error> {
-        // Write user input to PTY
         if let Some(ref pty) = self.pty_session {
             unsafe {
                 libc::write(pty.master_fd, data.as_ptr() as *const libc::c_void, data.len());
