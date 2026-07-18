@@ -1,0 +1,23 @@
+[package]
+name = "minishell-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "minishell-server"
+path = "src/main.rs"
+
+[dependencies]
+russh = "0.62"
+russh-sftp = "2.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+nix = { version = "0.29", features = ["process", "signal", "term"] }
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+subtle = "2"

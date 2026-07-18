@@ -7,6 +7,7 @@ members = [
     "crates/minishell-ssh",
     "crates/minishell-tui",
     "crates/minishell-xlsx",
+    "crates/minishell-server",
     "crates/minishell-cli",
 ]
 
@@ -22,3 +23,4 @@ minishell-store = { path = "crates/minishell-store" }
 minishell-ssh = { path = "crates/minishell-ssh" }
 minishell-tui = { path = "crates/minishell-tui" }
 minishell-xlsx = { path = "crates/minishell-xlsx" }
+minishell-server = { path = "crates/minishell-server" }
