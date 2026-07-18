@@ -3,7 +3,6 @@ use russh::{Channel, ChannelId, Pty};
 use crate::config::ServerConfig;
 use crate::shell::PtySession;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 pub struct MinishellServer {
     config: Arc<ServerConfig>,
@@ -23,7 +22,6 @@ impl server::Server for MinishellServer {
         ClientHandler {
             config: self.config.clone(),
             pty_session: None,
-            pty_rx: None,
             channel_id: None,
             authenticated: false,
             username: String::new(),
@@ -37,7 +35,6 @@ impl server::Server for MinishellServer {
 pub struct ClientHandler {
     config: Arc<ServerConfig>,
     pty_session: Option<PtySession>,
-    pty_rx: Option<mpsc::Receiver<Vec<u8>>>,
     channel_id: Option<ChannelId>,
     authenticated: bool,
     username: String,
@@ -121,10 +118,10 @@ impl server::Handler for ClientHandler {
                 let master_fd = pty.master_fd;
                 self.pty_session = Some(pty);
 
-                // Spawn background task to read PTY output
-                let (tx, rx) = mpsc::channel::<Vec<u8>>(256);
-                self.pty_rx = Some(rx);
+                // Get a Handle to send data from outside the handler
+                let handle = session.handle();
 
+                // Spawn background task: PTY output → SSH channel
                 tokio::task::spawn_blocking(move || {
                     let mut buf = [0u8; 4096];
                     loop {
@@ -148,11 +145,11 @@ impl server::Handler for ClientHandler {
                             if n <= 0 {
                                 break;
                             }
-                            if tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
-                                break;
-                            }
+                            let data = buf[..n as usize].to_vec();
+                            // Use Handle to send data - blocks until runtime accepts
+                            let rt = tokio::runtime::Handle::current();
+                            let _ = rt.block_on(handle.data(channel, data));
                         }
-                        // Check if PTY fd is closed (POLLHUP)
                         if pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                             break;
                         }
@@ -201,33 +198,23 @@ impl server::Handler for ClientHandler {
         Ok(())
     }
 
-    async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+    async fn data(&mut self, _channel: ChannelId, data: &[u8], _session: &mut Session) -> Result<(), Self::Error> {
         // Write user input to PTY
         if let Some(ref pty) = self.pty_session {
             unsafe {
                 libc::write(pty.master_fd, data.as_ptr() as *const libc::c_void, data.len());
             }
         }
-
-        // Drain PTY output and send back to client
-        if let Some(ref mut rx) = self.pty_rx {
-            while let Ok(output) = rx.try_recv() {
-                let _ = session.data(channel, output);
-            }
-        }
-
         Ok(())
     }
 
     async fn channel_close(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
         self.pty_session = None;
-        self.pty_rx = None;
         Ok(())
     }
 
     async fn channel_eof(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
         self.pty_session = None;
-        self.pty_rx = None;
         Ok(())
     }
 }
