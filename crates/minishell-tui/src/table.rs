@@ -3,6 +3,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::buffer::Buffer;
 use unicode_width::UnicodeWidthStr;
+use minishell_utils::pad_right;
 
 #[derive(Clone)]
 pub struct Column {
@@ -119,29 +120,6 @@ impl MachineTable {
             buf.set_line(area.x, y, &line, area.width);
         }
     }
-}
-
-fn pad_right(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        truncate_to_width(s, width)
-    } else {
-        format!("{}{}", s, " ".repeat(width - w))
-    }
-}
-
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    let mut result = String::new();
-    let mut current_width = 0;
-    for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + cw > max_width {
-            break;
-        }
-        result.push(c);
-        current_width += cw;
-    }
-    result
 }
 
 pub fn format_machine_row(m: &minishell_core::Machine, show_secrets: bool) -> Vec<String> {

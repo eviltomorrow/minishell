@@ -6,24 +6,18 @@ use std::thread;
 use minishell_core::Machine;
 use minishell_ssh::sftp::{self, FileEntry, format_modified, format_perm};
 use minishell_ssh::ConnectConfig;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
-use crate::styles;
 
 pub mod types;
 pub mod panel;
 pub mod transfer;
 pub mod render;
+pub mod input;
+pub mod view;
 
 pub use types::{Side, TreeEntry, ClipboardEntry};
 pub use panel::PanelState;
 pub use transfer::{TransferProgressState, ActionResult, PendingTransfer};
 pub use render::{HEADER_FG, ACTIVE_BORDER, INACTIVE_BORDER, DIR_FG, FILE_FG, SELECTED_BG, STATUS_OK, STATUS_ERR, DIM, HINT, render_name_and_path};
-use render::{format_size, pad_left, pad_right, truncate_to_width};
 
 pub struct FileBrowserState {
     machine: Machine,
@@ -62,7 +56,7 @@ impl FileBrowserState {
             active_side: Side::Local,
             machine,
             session: None,
-            status: "Connecting".to_string(),
+            status: "连接中".to_string(),
             pending: None,
             progress_file_name: String::new(),
             progress_current: 0,
@@ -135,7 +129,7 @@ impl FileBrowserState {
         if self.session.is_some() {
             self.refresh_remote();
         }
-        if !self.status.starts_with("Error") && !self.status.starts_with("Connecting") {
+        if !self.status.starts_with("错误") && !self.status.starts_with("连接中") {
             let p = self.active_panel();
             self.status = format!("{} entries", p.entries.len());
         }
@@ -152,7 +146,7 @@ impl FileBrowserState {
         if let Some(ref t) = self.pending {
             t.cancel();
         }
-        self.status = "Cancelling...".to_string();
+        self.status = "取消中...".to_string();
     }
 
     pub fn check_pending(&mut self) {
@@ -168,30 +162,30 @@ impl FileBrowserState {
                     };
                     self.remote.current_path = home;
                     self.refresh_remote();
-                    if !self.status.starts_with("Error") {
+                    if !self.status.starts_with("错误") {
                         let p = self.active_panel();
                         self.status = format!("{} entries", p.entries.len());
                     }
                 }
                 Ok(Err(e)) => {
                     self.pending_connect = None;
-                    self.status = format!("Error: {}", e);
+                    self.status = format!("错误: {}", e);
                     self.init_dirs();
                 }
                 Err(TryRecvError::Empty) => {
                     if self.connect_start.elapsed() > std::time::Duration::from_secs(5) {
                         self.pending_connect = None;
-                        self.status = "Error: Connection timed out (5s)".to_string();
+                        self.status = "连接超时（5秒）".to_string();
                         self.init_dirs();
                     } else {
                         self.connecting_dots = (self.connecting_dots + 1) % 4;
                         let dots = ".".repeat(self.connecting_dots as usize);
-                        self.status = format!("Connecting{}", dots);
+                        self.status = format!("连接中{}", dots);
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.pending_connect = None;
-                    self.status = "Error: SSH connection failed".to_string();
+                    self.status = "错误: SSH 连接失败".to_string();
                     self.init_dirs();
                 }
             }
@@ -210,7 +204,7 @@ impl FileBrowserState {
                 Ok(guard) => guard,
                 Err(_) => {
                     self.clear_transfer();
-                    self.status = "Transfer failed (internal error)".to_string();
+                    self.status = "传输失败（内部错误）".to_string();
                     return;
                 }
             };
@@ -224,11 +218,11 @@ impl FileBrowserState {
                 self.clear_transfer();
                 self.refresh_panel(side);
                 if self.transfer_queue.is_empty() {
-                    self.status = "Transfer complete".to_string();
+                    self.status = "传输完成".to_string();
                 } else {
                     self.transfer_queue.remove(0);
                     if self.transfer_queue.is_empty() {
-                        self.status = "Transfer complete".to_string();
+                        self.status = "传输完成".to_string();
                     } else {
                         self.process_next_transfer();
                     }
@@ -236,7 +230,7 @@ impl FileBrowserState {
             }
             Ok(ActionResult::Error(e)) => {
                 self.clear_transfer();
-                self.status = format!("Error: {}", e);
+                self.status = format!("错误: {}", e);
                 if !self.transfer_queue.is_empty() {
                     self.transfer_queue.remove(0);
                     if !self.transfer_queue.is_empty() {
@@ -247,7 +241,7 @@ impl FileBrowserState {
             Ok(ActionResult::Aborted) => {
                 self.clear_transfer();
                 self.transfer_queue.clear();
-                self.status = "Transfer cancelled".to_string();
+                self.status = "传输已取消".to_string();
                 self.init_dirs();
             }
             Err(TryRecvError::Empty) => {
@@ -258,7 +252,7 @@ impl FileBrowserState {
             }
             Err(TryRecvError::Disconnected) => {
                 self.clear_transfer();
-                self.status = "Transfer failed".to_string();
+                self.status = "传输失败".to_string();
             }
         }
     }
@@ -314,14 +308,14 @@ impl FileBrowserState {
         let session = match self.session.as_ref() {
             Some(s) => s,
             None => {
-                self.status = "Not connected".to_string();
+                self.status = "未连接".to_string();
                 return;
             }
         };
         let sftp = match session.sftp() {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("SFTP error: {}", e);
+                self.status = format!("SFTP 错误: {}", e);
                 return;
             }
         };
@@ -341,7 +335,7 @@ impl FileBrowserState {
                 self.status = format!("{} entries", self.remote.entries.len());
             }
             Err(e) => {
-                self.status = format!("Error: {}", e);
+                self.status = format!("错误: {}", e);
             }
         }
     }
@@ -631,7 +625,7 @@ impl FileBrowserState {
             if clip_side != side {
                 self.switch_confirm = Some(side);
                 self.status = format!(
-                    "Switch to {}? Clear selection [Y/N]",
+                    "切换到 {}？清空选择 [Y/N]",
                     side.label()
                 );
                 return;
@@ -675,7 +669,7 @@ impl FileBrowserState {
 
     fn open_clipboard_panel(&mut self) {
         if self.clipboard.is_empty() {
-            self.status = "No files selected".to_string();
+            self.status = "无文件选中".to_string();
             return;
         }
         self.clipboard_panel_open = true;
@@ -701,7 +695,7 @@ impl FileBrowserState {
         if self.clipboard.is_empty() {
             self.clipboard_side = None;
             self.clipboard_panel_open = false;
-            self.status = "Selection cleared".to_string();
+            self.status = "选择已清空".to_string();
             return;
         }
         if self.clipboard_panel_cursor >= self.clipboard.len() {
@@ -711,7 +705,7 @@ impl FileBrowserState {
 
     fn paste_from_clipboard(&mut self) {
         if self.clipboard.is_empty() {
-            self.status = "No files selected".to_string();
+            self.status = "无文件选中".to_string();
             return;
         }
         if self.pending.is_some() {
@@ -722,11 +716,11 @@ impl FileBrowserState {
             None => return,
         };
         if clip_side == self.active_side {
-            self.status = format!("Already on {} side", clip_side.label());
+            self.status = format!("已在 {} 侧", clip_side.label());
             return;
         }
         if clip_side == Side::Remote && self.session.is_none() {
-            self.status = "Not connected".to_string();
+            self.status = "未连接".to_string();
             return;
         }
 
@@ -736,100 +730,99 @@ impl FileBrowserState {
         self.process_next_transfer();
     }
 
+    fn start_file_transfer(&mut self, name: String, source_path: PathBuf, dest_path: PathBuf, is_dir: bool, direction: Side) {
+        let (tx, progress, cancel) = self.init_transfer(name.clone());
+        let src_str = source_path.to_string_lossy().to_string();
+        let dest_str = dest_path.to_string_lossy().to_string();
+        let done_side = direction.other();
+
+        let verb = match direction {
+            Side::Local => "Uploading",
+            Side::Remote => "Downloading",
+        };
+        if is_dir {
+            self.status = format!("{} {}/...", verb, name);
+        } else {
+            self.status = format!("{} {}...", verb, name);
+            if direction == Side::Local {
+                self.progress_total = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+
+        self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
+            if is_dir && direction == Side::Remote {
+                let _ = std::fs::create_dir_all(&dest_path);
+            }
+            let result = match (direction, is_dir) {
+                (Side::Local, true) => {
+                    let cb = |p: &sftp::TransferProgress| {
+                        let mut state = progress.lock().unwrap();
+                        state.file_name = p.file_name.clone();
+                        state.bytes = p.bytes_written;
+                        state.total = p.total_bytes;
+                    };
+                    sftp::upload_recursive(&sftp, &source_path, &dest_str, &cb, &cancel)
+                        .map_err(|e| format!("上传失败: {}", e))
+                        .and_then(|errs| if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) })
+                }
+                (Side::Local, false) => {
+                    let cb = |cur: u64, total: u64| {
+                        let mut state = progress.lock().unwrap();
+                        state.bytes = cur;
+                        state.total = total;
+                    };
+                    sftp::upload_file(&sftp, &source_path, &dest_str, &cb, &cancel)
+                        .map_err(|e| format!("上传失败: {}", e))
+                }
+                (Side::Remote, true) => {
+                    let cb = |p: &sftp::TransferProgress| {
+                        let mut state = progress.lock().unwrap();
+                        state.file_name = p.file_name.clone();
+                        state.bytes = p.bytes_written;
+                        state.total = p.total_bytes;
+                    };
+                    sftp::download_recursive(&sftp, &src_str, &dest_path, &cb, &cancel)
+                        .map_err(|e| format!("下载失败: {}", e))
+                        .and_then(|errs| if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) })
+                }
+                (Side::Remote, false) => {
+                    let cb = |cur: u64, total: u64| {
+                        let mut state = progress.lock().unwrap();
+                        state.bytes = cur;
+                        state.total = total;
+                    };
+                    sftp::download_file(&sftp, &src_str, &dest_path, &cb, &cancel)
+                        .map_err(|e| format!("下载失败: {}", e))
+                }
+            };
+            match result {
+                Ok(()) => { let _ = tx.send(ActionResult::TransferDone(done_side)); }
+                Err(e) => { let _ = tx.send(ActionResult::Error(e)); }
+            }
+        });
+    }
+
     fn process_next_transfer(&mut self) {
         let entry = match self.transfer_queue.first() {
             Some(e) => e.clone(),
             None => {
-                self.status = "Transfer complete".to_string();
+                self.status = "传输完成".to_string();
                 return;
             }
         };
 
-        let source_path = entry.source_path.clone();
-        let source_side = entry.source_side;
         let name = entry.name.clone();
+        let source_path = entry.source_path.clone();
         let is_dir = entry.is_dir;
-
         let dest_path = self.active_panel().current_path.join(&name);
-        let dest_str = dest_path.to_string_lossy().to_string();
-        let src_str = source_path.to_string_lossy().to_string();
+        let direction = entry.source_side;
 
-        let (tx, progress, cancel) = self.init_transfer(name.clone());
-
-        match source_side {
-            Side::Local => {
-                if is_dir {
-                    self.status = format!("Uploading {}/...", name);
-                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                        let cb = |p: &sftp::TransferProgress| {
-                            let mut state = progress.lock().unwrap();
-                            state.file_name = p.file_name.clone();
-                            state.bytes = p.bytes_written;
-                            state.total = p.total_bytes;
-                        };
-                        let errors = sftp::upload_recursive(&sftp, &source_path, &dest_str, &cb, &cancel);
-                        match errors {
-                            Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
-                            Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
-                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
-                        }
-                    });
-                } else {
-                    let total_size = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
-                    self.status = format!("Uploading {}...", name);
-                    self.progress_total = total_size;
-                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                        let cb = |cur: u64, total: u64| {
-                            let mut state = progress.lock().unwrap();
-                            state.bytes = cur;
-                            state.total = total;
-                        };
-                        match sftp::upload_file(&sftp, &source_path, &dest_str, &cb, &cancel) {
-                            Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
-                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
-                        }
-                    });
-                }
-            }
-            Side::Remote => {
-                if is_dir {
-                    self.status = format!("Downloading {}/...", name);
-                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                        let _ = std::fs::create_dir_all(&dest_path);
-                        let cb = |p: &sftp::TransferProgress| {
-                            let mut state = progress.lock().unwrap();
-                            state.file_name = p.file_name.clone();
-                            state.bytes = p.bytes_written;
-                            state.total = p.total_bytes;
-                        };
-                        let errors = sftp::download_recursive(&sftp, &src_str, &dest_path, &cb, &cancel);
-                        match errors {
-                            Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
-                            Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
-                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
-                        }
-                    });
-                } else {
-                    self.status = format!("Downloading {}...", name);
-                    self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                        let cb = |cur: u64, total: u64| {
-                            let mut state = progress.lock().unwrap();
-                            state.bytes = cur;
-                            state.total = total;
-                        };
-                        match sftp::download_file(&sftp, &src_str, &dest_path, &cb, &cancel) {
-                            Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
-                            Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
-                        }
-                    });
-                }
-            }
-        }
+        self.start_file_transfer(name, source_path, dest_path, is_dir, direction);
     }
 
     pub fn toggle_tree(&mut self) {
         if self.active_side == Side::Remote && self.session.is_none() {
-            self.status = "Not connected".to_string();
+            self.status = "未连接".to_string();
             return;
         }
 
@@ -1142,14 +1135,14 @@ impl FileBrowserState {
             let session = match minishell_ssh::create_session(&config) {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send(ActionResult::Error(format!("Connection failed: {}", e)));
+                    let _ = tx.send(ActionResult::Error(format!("连接失败: {}", e)));
                     return;
                 }
             };
             let sftp = match session.sftp() {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send(ActionResult::Error(format!("SFTP init failed: {}", e)));
+                    let _ = tx.send(ActionResult::Error(format!("SFTP 初始化失败: {}", e)));
                     return;
                 }
             };
@@ -1180,47 +1173,11 @@ impl FileBrowserState {
             Some(e) => e,
             None => return,
         };
-
         let filename = entry.name.clone();
         let local_path = self.entry_full_path_for_side(Side::Local);
         let remote_path = self.remote.current_path.join(&filename);
-        let remote_str = remote_path.to_string_lossy().to_string();
         let is_dir = entry.is_dir;
-
-        let (tx, progress, cancel) = self.init_transfer(filename.clone());
-
-        if is_dir {
-            self.status = format!("Uploading {}/...", filename);
-            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                let cb = |p: &sftp::TransferProgress| {
-                    let mut state = progress.lock().unwrap();
-                    state.file_name = p.file_name.clone();
-                    state.bytes = p.bytes_written;
-                    state.total = p.total_bytes;
-                };
-                let errors = sftp::upload_recursive(&sftp, &local_path, &remote_str, &cb, &cancel);
-                match errors {
-                    Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
-                    Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
-                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
-                }
-            });
-        } else {
-            let total_size = entry.size;
-            self.status = format!("Uploading {}...", filename);
-            self.progress_total = total_size;
-            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                let cb = |cur: u64, total: u64| {
-                    let mut state = progress.lock().unwrap();
-                    state.bytes = cur;
-                    state.total = total;
-                };
-                match sftp::upload_file(&sftp, &local_path, &remote_str, &cb, &cancel) {
-                    Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Remote)); }
-                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Upload failed: {}", e))); }
-                }
-            });
-        }
+        self.start_file_transfer(filename, local_path, remote_path, is_dir, Side::Local);
     }
 
     fn download_selected(&mut self) {
@@ -1231,48 +1188,11 @@ impl FileBrowserState {
             Some(e) => e,
             None => return,
         };
-
         let filename = entry.name.clone();
         let remote_path = self.entry_full_path_for_side(Side::Remote);
         let local_path = self.local.current_path.join(&filename);
-        let remote_str = remote_path.to_string_lossy().to_string();
         let is_dir = entry.is_dir;
-
-        let (tx, progress, cancel) = self.init_transfer(filename.clone());
-
-        if is_dir {
-            self.status = format!("Downloading {}/...", filename);
-            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                let _ = std::fs::create_dir_all(&local_path);
-                let cb = |p: &sftp::TransferProgress| {
-                    let mut state = progress.lock().unwrap();
-                    state.file_name = p.file_name.clone();
-                    state.bytes = p.bytes_written;
-                    state.total = p.total_bytes;
-                };
-                let errors = sftp::download_recursive(&sftp, &remote_str, &local_path, &cb, &cancel);
-                match errors {
-                    Ok(errs) if errs.is_empty() => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
-                    Ok(errs) => { let _ = tx.send(ActionResult::Error(errs.join("; "))); }
-                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
-                }
-            });
-        } else {
-            let total_size = entry.size;
-            self.status = format!("Downloading {}...", filename);
-            self.progress_total = total_size;
-            self.start_transfer(tx, progress, cancel, move |sftp, tx, progress, cancel| {
-                let cb = |cur: u64, total: u64| {
-                    let mut state = progress.lock().unwrap();
-                    state.bytes = cur;
-                    state.total = total;
-                };
-                match sftp::download_file(&sftp, &remote_str, &local_path, &cb, &cancel) {
-                    Ok(()) => { let _ = tx.send(ActionResult::TransferDone(Side::Local)); }
-                    Err(e) => { let _ = tx.send(ActionResult::Error(format!("Download failed: {}", e))); }
-                }
-            });
-        }
+        self.start_file_transfer(filename, remote_path, local_path, is_dir, Side::Remote);
     }
 
     fn start_transfer_confirm(&mut self) {
@@ -1376,14 +1296,14 @@ impl FileBrowserState {
             let session = match self.session.as_ref() {
                 Some(s) => s,
                 None => {
-                    self.status = "Not connected".to_string();
+                    self.status = "未连接".to_string();
                     return;
                 }
             };
             let sftp = match session.sftp() {
                 Ok(s) => s,
                 Err(e) => {
-                    self.status = format!("SFTP error: {}", e);
+                    self.status = format!("SFTP 错误: {}", e);
                     return;
                 }
             };
@@ -1404,7 +1324,7 @@ impl FileBrowserState {
                 self.refresh_panel(side);
             }
             Err(e) => {
-                self.status = format!("Delete failed: {}", e);
+                self.status = format!("删除失败: {}", e);
             }
         }
     }
@@ -1417,14 +1337,14 @@ impl FileBrowserState {
         self.old_entry_name = entry.name.clone();
         self.old_entry_path = self.current_entry_full_path();
         self.rename_input = Some(entry.name.clone());
-        self.status = "Enter new name:".to_string();
+        self.status = "输入新名称:".to_string();
     }
 
     fn confirm_rename(&mut self) {
         let new_name = match self.rename_input.take() {
             Some(n) if !n.is_empty() => n,
             _ => {
-                self.status = "Rename cancelled".to_string();
+                self.status = "重命名已取消".to_string();
                 return;
             }
         };
@@ -1438,14 +1358,14 @@ impl FileBrowserState {
                 let session = match self.session.as_ref() {
                     Some(s) => s,
                     None => {
-                        self.status = "Not connected".to_string();
+                        self.status = "未连接".to_string();
                         return;
                     }
                 };
                 let sftp = match session.sftp() {
                     Ok(s) => s,
                     Err(e) => {
-                        self.status = format!("SFTP error: {}", e);
+                        self.status = format!("SFTP 错误: {}", e);
                         return;
                     }
                 };
@@ -1456,801 +1376,12 @@ impl FileBrowserState {
 
         match result {
             Ok(()) => {
-                self.status = format!("Renamed to {}", new_name);
+                self.status = format!("已重命名为 {}", new_name);
                 self.refresh_panel(side);
             }
             Err(e) => {
-                self.status = format!("Rename failed: {}", e);
+                self.status = format!("重命名失败: {}", e);
             }
-        }
-    }
-
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-
-        if self.rename_input.is_some() {
-            match key.code {
-                KeyCode::Enter => self.confirm_rename(),
-                KeyCode::Esc => {
-                    self.rename_input = None;
-                    self.status = "Rename cancelled".to_string();
-                }
-                KeyCode::Backspace => {
-                    if let Some(ref mut s) = self.rename_input {
-                        s.pop();
-                    }
-                }
-                KeyCode::Char(c) => {
-                    if let Some(ref mut s) = self.rename_input {
-                        s.push(c);
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        if self.confirm_delete.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_delete_action(),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.confirm_delete = None;
-                    self.status = "Delete cancelled".to_string();
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        if self.transfer_confirm.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_transfer(),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.transfer_confirm = None;
-                    self.status = "Transfer cancelled".to_string();
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        if self.switch_confirm.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_switch(),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.switch_confirm = None;
-                    self.status = "Selection unchanged".to_string();
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        if self.clipboard_panel_open {
-            match key.code {
-                KeyCode::Char('n') => {
-                    self.clipboard_panel_next();
-                    return;
-                }
-                KeyCode::Char('k') => {
-                    self.clipboard_panel_remove();
-                    return;
-                }
-                KeyCode::Char('v') | KeyCode::Esc => {
-                    self.close_clipboard_panel();
-                    return;
-                }
-                KeyCode::Char('p') => {
-                    self.close_clipboard_panel();
-                    self.paste_from_clipboard();
-                    return;
-                }
-                KeyCode::Char('y') => {
-                    return; // block yank while panel is open
-                }
-                _ => {} // fall through to normal handler
-            }
-        }
-
-        if self.pending.is_some() {
-            if key.code == KeyCode::Esc {
-                self.cancel_transfer();
-            }
-            return;
-        }
-
-        match key.code {
-            KeyCode::Up => self.move_cursor(-1, self.visible_rows),
-            KeyCode::Down => self.move_cursor(1, self.visible_rows),
-            KeyCode::PageUp => self.cursor_first(),
-            KeyCode::PageDown => self.cursor_last(self.visible_rows),
-            KeyCode::Right | KeyCode::Enter => self.enter_dir(),
-            KeyCode::Left => self.collapse_or_navigate_tree(),
-            KeyCode::Esc => self.parent_dir(),
-            KeyCode::Tab => self.toggle_side(),
-            KeyCode::Char('/') => self.goto_root(),
-            KeyCode::Char('~') => self.goto_home(),
-            KeyCode::Char('x') => {
-                if self.clipboard.is_empty() {
-                    self.start_transfer_confirm();
-                }
-            }
-            KeyCode::Char('d') => self.start_delete(),
-            KeyCode::Char('r') => self.start_rename(),
-            KeyCode::Char('t') => self.toggle_tree(),
-            KeyCode::Char('y') => self.yank_toggle(),
-            KeyCode::Char('v') => self.open_clipboard_panel(),
-            KeyCode::Char('p') => self.paste_from_clipboard(),
-            _ => {}
-        }
-    }
-
-    pub fn render(&mut self, f: &mut Frame) {
-        let area = f.area();
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),                       // header (text + separator)
-                Constraint::Min(2),                          // panels
-                Constraint::Length(1),                       // status + help
-            ])
-            .split(area);
-
-        // Header
-        let header_lines = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(chunks[0]);
-
-        let host = self.machine.effective_host();
-        let path = self.active_panel().current_path.clone();
-        let breadcrumb = path.components()
-            .map(|c| c.as_os_str().to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join(" > ");
-
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled("文件浏览器", styles::header_style()),
-                Span::styled(format!("  {}@{}:{}", self.machine.username, host, self.machine.port), styles::help_style()),
-                Span::styled(format!("  {}", breadcrumb), Style::default().fg(Color::DarkGray)),
-            ])),
-            header_lines[0],
-        );
-
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(area.width as usize),
-                styles::separator_style(),
-            ))),
-            header_lines[1],
-        );
-
-        // Split panels
-        let panels = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
-            .split(chunks[1]);
-
-        self.visible_rows = (chunks[1].height as usize).saturating_sub(4).max(1);
-        self.render_panel(f, panels[0], Side::Local);
-        self.render_panel(f, panels[1], Side::Remote);
-
-        // Clipboard panel overlay
-        if self.clipboard_panel_open {
-            let panel_area = match self.clipboard_side.unwrap_or(self.active_side) {
-                Side::Local => panels[0],
-                Side::Remote => panels[1],
-            };
-            self.render_clipboard_panel(f, panel_area);
-        }
-
-        // Status + Help bar
-        {
-            let is_transferring = self.pending.is_some();
-            let (status_color, prefix) = if is_transferring {
-                (Color::Yellow, "\u{25B6}")
-            } else if self.status.starts_with("Error")
-                || self.status.starts_with("Delete failed")
-                || self.status.starts_with("Upload failed")
-                || self.status.starts_with("Download failed")
-            {
-                (STATUS_ERR, "\u{2717}")
-            } else if self.status.starts_with("Transfer complete")
-                || self.status.starts_with("Deleted")
-                || self.status.starts_with("Renamed")
-            {
-                (STATUS_OK, "\u{2713}")
-            } else {
-                (HINT, " ")
-            };
-
-            let status_text = if self.rename_input.is_some() {
-                if let Some(ref input) = self.rename_input {
-                    format!("{} {}", self.status, input)
-                } else {
-                    self.status.clone()
-                }
-            } else if self.transfer_confirm.is_some() || self.pending.is_some() {
-                self.status.clone()
-            } else {
-                self.status.clone()
-            };
-
-            let mut spans: Vec<Span> = vec![
-                Span::styled(prefix, Style::default()),
-            ];
-
-            if self.pending.is_some() && self.progress_total > 0 {
-                let pct = (self.progress_current * 100 / self.progress_total) as usize;
-                let bar_width = 20;
-                let filled = pct * bar_width / 100;
-                let empty = bar_width - filled;
-                spans.push(Span::styled(&self.progress_file_name, Style::default().fg(Color::Yellow)));
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled("\u{2588}".repeat(filled), Style::default().fg(Color::Cyan)));
-                spans.push(Span::styled("\u{2591}".repeat(empty), Style::default().fg(Color::DarkGray)));
-                spans.push(Span::styled(format!(" {}%", pct), Style::default().fg(Color::Yellow)));
-            } else if self.confirm_delete.is_some() {
-                // Format: "Delete:|[DIR]|name│/full/path|side"
-                let parts: Vec<&str> = status_text.split('|').collect();
-                if parts.len() >= 4 {
-                    spans.push(Span::styled(
-                        format!("{} ", parts[0]),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled(
-                        parts[1],
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ));
-                    let name_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-                    let sep_style = Style::default().fg(Color::DarkGray);
-                    let path_style = Style::default().fg(Color::Cyan);
-                    let mut name_spans = render_name_and_path(parts[2], name_style, sep_style, path_style);
-                    // Append "?" to the last span (path)
-                    if let Some(last) = name_spans.last_mut() {
-                        let content = last.content.to_mut();
-                        content.push('?');
-                    }
-                    spans.extend(name_spans);
-                    spans.push(Span::styled(
-                        format!(" ({})", parts[3]),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                } else {
-                    spans.push(Span::styled(&status_text, Style::default().fg(Color::Red)));
-                }
-            } else if self.transfer_confirm.is_some() {
-                // Format: "Push:|[DIR]|name│/src/path|->|/dst/path"
-                let parts: Vec<&str> = status_text.split('|').collect();
-                if parts.len() >= 5 {
-                    spans.push(Span::styled(
-                        format!("{} ", parts[0]),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled(
-                        parts[1],
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ));
-                    let name_spans = render_name_and_path(
-                        parts[2],
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                        Style::default().fg(Color::DarkGray),
-                        Style::default().fg(Color::DarkGray),
-                    );
-                    spans.extend(name_spans);
-                    spans.push(Span::styled(
-                        format!(" {} ", parts[3]),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled(
-                        format!("{}?", parts[4]),
-                        Style::default().fg(Color::Cyan),
-                    ));
-                } else {
-                    spans.push(Span::styled(&status_text, Style::default().fg(Color::Yellow)));
-                }
-            } else if self.switch_confirm.is_some() {
-                spans.push(Span::styled(&status_text, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-            } else {
-                spans.push(Span::styled(&status_text, Style::default().fg(status_color)));
-            }
-
-            spans.push(Span::styled(" │ ", styles::status_sep_style()));
-
-            let right_spans: Vec<Span> = if self.confirm_delete.is_some() {
-                vec![
-                    Span::styled("[Y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                    Span::styled("es  ", styles::help_style()),
-                    Span::styled("[N]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::styled("o", styles::help_style()),
-                ]
-            } else if self.transfer_confirm.is_some() {
-                vec![
-                    Span::styled("[Y]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                    Span::styled("es  ", styles::help_style()),
-                    Span::styled("[N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                    Span::styled("o", styles::help_style()),
-                ]
-            } else if self.switch_confirm.is_some() {
-                vec![
-                    Span::styled("[Y]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                    Span::styled("es  ", styles::help_style()),
-                    Span::styled("[N]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                    Span::styled("o", styles::help_style()),
-                ]
-            } else if self.rename_input.is_some() {
-                vec![
-                    Span::styled("Enter", styles::key_style()),
-                    Span::styled(":ok  ", styles::help_style()),
-                    Span::styled("Esc", styles::key_style()),
-                    Span::styled(":cancel", styles::help_style()),
-                ]
-            } else if self.pending.is_some() {
-                vec![Span::styled("(transferring...)", styles::help_style())]
-            } else if self.clipboard_panel_open {
-                vec![
-                    Span::styled("n", styles::key_style()),
-                    Span::styled(":next  ", styles::help_style()),
-                    Span::styled("k", styles::key_style()),
-                    Span::styled(":remove  ", styles::help_style()),
-                    Span::styled("p", styles::key_style()),
-                    Span::styled(":paste  ", styles::help_style()),
-                    Span::styled("v", styles::key_style()),
-                    Span::styled(":close", styles::help_style()),
-                ]
-            } else if !self.active_panel().expanded_dirs.is_empty() {
-                let mut hints = vec![
-                    Span::styled("Tab", styles::key_style()),
-                    Span::styled(":panel  ", styles::help_style()),
-                    Span::styled("\u{2191}\u{2193}", styles::key_style()),
-                    Span::styled(":move  ", styles::help_style()),
-                    Span::styled("\u{2192}", styles::key_style()),
-                    Span::styled(":enter  ", styles::help_style()),
-                    Span::styled("\u{2190}", styles::key_style()),
-                    Span::styled(":back  ", styles::help_style()),
-                    Span::styled("y", styles::key_style()),
-                    Span::styled(":copy  ", styles::help_style()),
-                    Span::styled("v", styles::key_style()),
-                    Span::styled(":view  ", styles::help_style()),
-                ];
-                if self.clipboard.is_empty() {
-                    hints.push(Span::styled("x", styles::key_style()));
-                    hints.push(Span::styled(":transfer  ", styles::help_style()));
-                }
-                hints.extend([
-                    Span::styled("d", styles::key_style()),
-                    Span::styled(":del  ", styles::help_style()),
-                    Span::styled("r", styles::key_style()),
-                    Span::styled(":rename  ", styles::help_style()),
-                    Span::styled("t", styles::key_style()),
-                    Span::styled(":tree  ", styles::help_style()),
-                    Span::styled("q", styles::key_style()),
-                    Span::styled(":quit", styles::help_style()),
-                ]);
-                hints
-            } else {
-                let mut hints = vec![
-                    Span::styled("Tab", styles::key_style()),
-                    Span::styled(":panel  ", styles::help_style()),
-                    Span::styled("\u{2191}\u{2193}", styles::key_style()),
-                    Span::styled(":move  ", styles::help_style()),
-                    Span::styled("\u{2192}", styles::key_style()),
-                    Span::styled(":enter  ", styles::help_style()),
-                    Span::styled("\u{2190}", styles::key_style()),
-                    Span::styled(":back  ", styles::help_style()),
-                    Span::styled("y", styles::key_style()),
-                    Span::styled(":copy  ", styles::help_style()),
-                    Span::styled("v", styles::key_style()),
-                    Span::styled(":view  ", styles::help_style()),
-                    Span::styled("p", styles::key_style()),
-                    Span::styled(":paste  ", styles::help_style()),
-                ];
-                if self.clipboard.is_empty() {
-                    hints.push(Span::styled("x", styles::key_style()));
-                    hints.push(Span::styled(":transfer  ", styles::help_style()));
-                }
-                hints.extend([
-                    Span::styled("d", styles::key_style()),
-                    Span::styled(":del  ", styles::help_style()),
-                    Span::styled("r", styles::key_style()),
-                    Span::styled(":rename  ", styles::help_style()),
-                    Span::styled("t", styles::key_style()),
-                    Span::styled(":tree  ", styles::help_style()),
-                    Span::styled("q", styles::key_style()),
-                    Span::styled(":quit", styles::help_style()),
-                ]);
-                hints
-            };
-
-            let w = area.width as usize;
-            let right_edge_gap = 2usize;
-            let left_width: usize = spans.iter().map(|s| s.width()).sum();
-            let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
-            if left_width + right_width + right_edge_gap < w {
-                let padding = w - left_width - right_width - right_edge_gap;
-                spans.push(Span::raw(" ".repeat(padding)));
-            }
-            spans.extend(right_spans);
-
-            f.render_widget(
-                Line::from(spans).style(Style::default().bg(Color::Reset)),
-                chunks[2],
-            );
-
-            if self.rename_input.is_some() {
-                let prefix_width: usize = 3;
-                let status_width = UnicodeWidthStr::width(status_text.as_str());
-                let cx = chunks[2].x + prefix_width as u16 + status_width as u16;
-                f.set_cursor_position((cx, chunks[2].y));
-            }
-        }
-    }
-
-    fn render_panel(&self, f: &mut Frame, area: Rect, side: Side) {
-        let panel = match side {
-            Side::Local => &self.local,
-            Side::Remote => &self.remote,
-        };
-        let is_active = self.active_side == side && self.pending.is_none();
-
-        let border_style = if is_active {
-            Style::default().fg(ACTIVE_BORDER)
-        } else {
-            Style::default().fg(INACTIVE_BORDER)
-        };
-
-        let title_style = if is_active {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(DIM)
-        };
-
-        let label = format!(" {} ", side.label());
-        let title = Line::from(vec![
-            Span::styled(label, title_style),
-            Span::styled(
-                panel.current_path.display().to_string(),
-                if is_active {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(DIM)
-                },
-            ),
-        ]);
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .border_type(if is_active {
-                ratatui::widgets::BorderType::Plain
-            } else {
-                ratatui::widgets::BorderType::Rounded
-            });
-
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
-        // Column widths
-        let perm_width: usize = 10;
-        let size_width: usize = 8;
-        let modified_width: usize = 16;
-        let gap: usize = 2;
-        let overhead: usize = 1 + perm_width + 1 + size_width + gap + modified_width;
-        let name_area = (inner.width as usize).saturating_sub(overhead).max(6);
-
-        // Column header
-        let header = Line::from(vec![
-            Span::styled(
-                pad_right("Name", name_area),
-                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                pad_left("Perm", perm_width),
-                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                pad_left("Size", size_width),
-                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                pad_left("Modified", modified_width),
-                Style::default().fg(HEADER_FG).add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        f.render_widget(
-            header,
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
-        // Separator under header
-        f.render_widget(
-            Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
-                Style::default().fg(DIM),
-            )),
-            Rect {
-                x: inner.x,
-                y: inner.y + 1,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
-        // Empty directory hint
-        if panel.tree_entries.is_empty() {
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "  (empty)",
-                    Style::default().fg(DIM),
-                ))),
-                Rect {
-                    x: inner.x,
-                    y: inner.y + 2,
-                    width: inner.width,
-                    height: 1,
-                },
-            );
-            return;
-        }
-
-        // File entries
-        let visible = (inner.height.saturating_sub(2)) as usize;
-        let selected_active_style = Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-            .bg(SELECTED_BG);
-        let selected_inactive_style = Style::default()
-            .fg(Color::White)
-            .bg(Color::Rgb(70, 70, 90));
-        let selected_style = if is_active {
-            selected_active_style
-        } else {
-            selected_inactive_style
-        };
-        let dir_style = Style::default().fg(DIR_FG);
-        let file_style = Style::default().fg(FILE_FG);
-        let dim_style = Style::default().fg(DIM);
-
-        let marker_active = if is_active { "\u{25B8}" } else { " " };
-
-        for i in 0..visible {
-            let idx = panel.scroll_offset + i;
-            if idx >= panel.tree_entries.len() {
-                break;
-            }
-            let te = &panel.tree_entries[idx];
-            let entry = &te.entry;
-            let display_depth = te.depth;
-            let is_selected = idx == panel.cursor;
-            let in_clipboard = self.is_effectively_selected(&entry.name, side, idx);
-            let style = if is_selected {
-                selected_style
-            } else if in_clipboard {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else if entry.is_dir {
-                dir_style
-            } else {
-                file_style
-            };
-
-            let marker = if is_selected {
-                marker_active
-            } else {
-                " "
-            };
-            let icon = if in_clipboard {
-                "[\u{2713}]"
-            } else if entry.is_dir {
-                "\u{1F4C1}"
-            } else {
-                "\u{1F4C4}"
-            };
-            let indent = "  ".repeat(display_depth);
-            let short_name = entry.name.rsplit('/').next().unwrap_or(&entry.name);
-            let name = format!("{}{}{}{}", marker, indent, icon, short_name);
-
-            let display_name = truncate_to_width(&name, name_area);
-            let display_name_padded = pad_right(&display_name, name_area);
-
-            let perm_str = pad_left(&entry.perm, perm_width);
-
-            let size_str = if entry.is_dir {
-                pad_left("", size_width)
-            } else {
-                pad_left(&format_size(entry.size), size_width)
-            };
-
-            let modified_str = pad_left(&entry.modified, modified_width);
-
-            let y = inner.y + 2 + i as u16;
-
-            f.render_widget(
-                Line::from(vec![
-                    Span::styled(display_name_padded, style),
-                    Span::raw(" "),
-                    Span::styled(
-                        &perm_str,
-                        if is_selected { selected_style } else { dim_style },
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        &size_str,
-                        if is_selected { selected_style } else { dim_style },
-                    ),
-                    Span::raw("  "),
-                    Span::styled(
-                        &modified_str,
-                        if is_selected { selected_style } else { dim_style },
-                    ),
-                ]),
-                Rect {
-                    x: inner.x,
-                    y,
-                    width: inner.width,
-                    height: 1,
-                },
-            );
-        }
-    }
-
-    fn render_clipboard_panel(&self, f: &mut Frame, area: Rect) {
-        let count = self.clipboard.len();
-
-        // Panel size — wider, with room for header
-        let panel_width = 42u16.min(area.width.saturating_sub(2));
-        let panel_height = (count as u16 + 4).min(area.height).max(5);
-
-        // Bottom-right corner of the panel area
-        let x = area.x + area.width.saturating_sub(panel_width);
-        let y = area.y + area.height.saturating_sub(panel_height);
-
-        let panel_area = Rect { x, y, width: panel_width, height: panel_height };
-
-        // Outer block with rounded border
-        let block = Block::default()
-            .title(Line::from(vec![
-                Span::raw(" "),
-                Span::styled("\u{1F4CB}", Style::default()),
-                Span::styled(
-                    format!(" Selection ({}) ", count),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                ),
-            ]))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .border_type(ratatui::widgets::BorderType::Rounded);
-
-        let inner = block.inner(panel_area);
-        f.render_widget(block, panel_area);
-
-        let col_name_w = inner.width.saturating_sub(7) as usize;
-
-        // Header row: "  Name ...  Side"
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("  {:<width$}", "Name", width = col_name_w),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Side",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                ),
-            ])),
-            Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
-        );
-
-        // Header underline
-        let mut line_spans = vec![];
-        line_spans.push(Span::styled(
-            format!("{}\u{2500}{}\u{2500}{}\u{2500}{}",
-                "\u{2500}".repeat(1),
-                "\u{2500}".repeat(col_name_w.saturating_sub(1)),
-                "\u{2500}".repeat(1),
-                "\u{2500}".repeat(3),
-            ),
-            Style::default().fg(Color::Rgb(60, 60, 90)),
-        ));
-        f.render_widget(
-            Paragraph::new(Line::from(line_spans)),
-            Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
-        );
-
-        // File list
-        let list_start_y = inner.y + 2;
-        let visible_count = (inner.height as usize).saturating_sub(2); // header(2)
-        let scroll = self.clipboard_panel_cursor
-            .saturating_sub(visible_count.saturating_sub(1))
-            .max(0);
-
-        for i in 0..visible_count {
-            let idx = scroll + i;
-            if idx >= self.clipboard.len() {
-                break;
-            }
-            let entry = &self.clipboard[idx];
-            let is_cursor = idx == self.clipboard_panel_cursor;
-
-            let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
-            let side_label = match entry.source_side {
-                Side::Local => "L",
-                Side::Remote => "R",
-            };
-
-            let y_pos = list_start_y + i as u16;
-
-            // Row background for cursor
-            if is_cursor {
-                f.render_widget(
-                    Block::default().style(Style::default().bg(Color::Rgb(30, 50, 70))),
-                    Rect { x: inner.x, y: y_pos, width: inner.width, height: 1 },
-                );
-            }
-
-            // Cursor indicator
-            let cursor_mark = if is_cursor { "\u{25B8}" } else { " " };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    cursor_mark,
-                    if is_cursor {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ))),
-                Rect { x: inner.x, y: y_pos, width: 1, height: 1 },
-            );
-
-            // Icon
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    icon,
-                    Style::default(),
-                ))),
-                Rect { x: inner.x + 1, y: y_pos, width: 2, height: 1 },
-            );
-
-            // Name
-            let name_display = truncate_to_width(&entry.name, col_name_w);
-            let name_padded = pad_right(&name_display, col_name_w);
-            let name_style = if is_cursor {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(name_padded, name_style))),
-                Rect { x: inner.x + 3, y: y_pos, width: col_name_w as u16, height: 1 },
-            );
-
-            // Side badge [L] / [R]
-            let side_text = format!("[{}]", side_label);
-            let side_style = if is_cursor {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(side_text, side_style))),
-                Rect {
-                    x: inner.x + inner.width.saturating_sub(4),
-                    y: y_pos,
-                    width: 4,
-                    height: 1,
-                },
-            );
         }
     }
 }

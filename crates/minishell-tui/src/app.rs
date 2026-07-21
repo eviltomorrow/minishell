@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use minishell_core::Machine;
 use minishell_store::Store;
 
-use super::form::{FormState, DeleteState};
+use super::form::{FormState, DeleteState, FieldIndex};
 use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths};
 use super::filebrowser::FileBrowserState;
 use super::styles;
@@ -386,13 +386,11 @@ fn render_delete_confirm(f: &mut ratatui::Frame, area: Rect, target: &Machine) {
 }
 
 fn update(state: &mut AppState, key: KeyEvent) {
-    // Ctrl+C always quits regardless of dialog state
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         state.should_quit = true;
         return;
     }
 
-    // Handle form/dialog first
     if state.form.is_some() {
         handle_form_key(state, key);
         return;
@@ -402,53 +400,54 @@ fn update(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    // Search focused
     if state.search_focused {
-        match key.code {
-            KeyCode::Esc => {
-                state.search_focused = false;
-                state.search_input.clear();
-                reload_machines(state);
-            }
-            KeyCode::Enter => {
-                state.search_focused = false;
-                reload_machines(state);
-            }
-            KeyCode::Backspace => {
-                state.search_input.pop();
-                reload_machines(state);
-            }
-            KeyCode::Up => {
-                state.search_focused = false;
-                state.table.move_up();
-            }
-            KeyCode::Down => {
-                state.search_focused = false;
-                state.table.move_down();
-            }
-            KeyCode::Char(c) => {
-                state.search_input.push(c);
-                reload_machines(state);
-            }
-            _ => {}
-        }
-        return;
+        handle_search_key(state, key);
+    } else {
+        handle_normal_key(state, key);
     }
+}
 
-    // Normal mode
+fn handle_search_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            state.search_focused = false;
+            state.search_input.clear();
+            reload_machines(state);
+        }
+        KeyCode::Enter => {
+            state.search_focused = false;
+            reload_machines(state);
+        }
+        KeyCode::Backspace => {
+            state.search_input.pop();
+            reload_machines(state);
+        }
+        KeyCode::Up => {
+            state.search_focused = false;
+            state.table.move_up();
+        }
+        KeyCode::Down => {
+            state.search_focused = false;
+            state.table.move_down();
+        }
+        KeyCode::Char(c) => {
+            state.search_input.push(c);
+            reload_machines(state);
+        }
+        _ => {}
+    }
+}
+
+fn handle_normal_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') => state.should_quit = true,
         KeyCode::Up | KeyCode::Char('k') => state.table.move_up(),
         KeyCode::Down | KeyCode::Char('j') => state.table.move_down(),
         KeyCode::PageUp => {
-            for _ in 0..10 {
-                state.table.move_up();
-            }
+            for _ in 0..10 { state.table.move_up(); }
         }
         KeyCode::PageDown => {
-            for _ in 0..10 {
-                state.table.move_down();
-            }
+            for _ in 0..10 { state.table.move_down(); }
         }
         KeyCode::Char('g') => state.table.goto_top(),
         KeyCode::Char('G') => state.table.goto_bottom(),
@@ -570,11 +569,11 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
             if form.fields[form.step].select_options.is_some() {
                 return;
             }
-            if c == ' ' && form.step != 4 && form.step != 5 {
+            if c == ' ' && form.step != FieldIndex::Password as usize && form.step != FieldIndex::PrivateKey as usize {
                 form.error = Some("不能包含空格".to_string());
                 return;
             }
-            if form.step == 2 && !c.is_ascii_digit() {
+            if form.step == FieldIndex::Port as usize && !c.is_ascii_digit() {
                 form.error = Some("端口只能输入数字".to_string());
                 return;
             }
@@ -615,11 +614,11 @@ fn handle_paste(state: &mut AppState, data: &str) {
         if form.fields[form.step].select_options.is_some() {
             return;
         }
-        if data.contains(' ') && form.step != 4 && form.step != 5 {
+        if data.contains(' ') && form.step != FieldIndex::Password as usize && form.step != FieldIndex::PrivateKey as usize {
             form.error = Some("不能包含空格".to_string());
             return;
         }
-        if form.step == 2 && !data.chars().all(|c| c.is_ascii_digit()) {
+        if form.step == FieldIndex::Port as usize && !data.chars().all(|c| c.is_ascii_digit()) {
             form.error = Some("端口只能输入数字".to_string());
             return;
         }

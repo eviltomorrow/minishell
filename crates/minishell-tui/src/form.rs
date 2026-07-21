@@ -1,5 +1,17 @@
 use minishell_core::Machine;
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum FieldIndex {
+    Ip = 0,
+    NatIp = 1,
+    Port = 2,
+    Username = 3,
+    Password = 4,
+    PrivateKey = 5,
+    Device = 6,
+    Remark = 7,
+}
+
 pub const FORM_FIELDS: &[(&str, usize, usize)] = &[
     ("IP:", 64, 40),
     ("NAT-IP:", 64, 40),
@@ -116,7 +128,7 @@ impl FormState {
         let mut fields: Vec<FormField> = FORM_FIELDS.iter()
             .map(|(label, max_len, width)| FormField::new(label, *max_len, *width))
             .collect();
-        fields[6] = FormField::new_select("Device:", vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()]);
+        fields[FieldIndex::Device as usize] = FormField::new_select("Device:", vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()]);
         FormState { fields, step: 0, is_edit: false, target_id: None, num: 0, error: None }
     }
 
@@ -134,7 +146,7 @@ impl FormState {
 
         let fields: Vec<FormField> = FORM_FIELDS.iter().enumerate()
             .map(|(i, (label, max_len, width))| {
-                if i == 6 {
+                if i == FieldIndex::Device as usize {
                     let options = vec!["Linux".into(), "Router".into(), "Switch".into(), "Other".into()];
                     let val = &values[i];
                     let idx = if val == "-" || val.is_empty() { 0 } else { options.iter().position(|o| o == val).unwrap_or(0) };
@@ -168,7 +180,7 @@ impl FormState {
             if field.select_options.is_some() {
                 continue;
             }
-            if i == 4 || i == 5 {
+            if i == FieldIndex::Password as usize || i == FieldIndex::PrivateKey as usize {
                 continue;
             }
             if field.value.contains(' ') {
@@ -176,12 +188,12 @@ impl FormState {
             }
         }
 
-        let ip = self.fields[0].value.trim();
-        let nat_ip = self.fields[1].value.trim();
-        let port = self.fields[2].value.trim();
-        let username = self.fields[3].value.trim();
-        let password = self.fields[4].value.trim();
-        let private_key = self.fields[5].value.trim();
+        let ip = self.fields[FieldIndex::Ip as usize].value.trim();
+        let nat_ip = self.fields[FieldIndex::NatIp as usize].value.trim();
+        let port = self.fields[FieldIndex::Port as usize].value.trim();
+        let username = self.fields[FieldIndex::Username as usize].value.trim();
+        let password = self.fields[FieldIndex::Password as usize].value.trim();
+        let private_key = self.fields[FieldIndex::PrivateKey as usize].value.trim();
 
         let empty = |s: &str| s.is_empty() || s == "-";
 
@@ -205,20 +217,20 @@ impl FormState {
     }
 
     pub fn to_machine(&self) -> Machine {
-        let port: i32 = self.fields[2].value.parse().unwrap_or(22);
+        let port: i32 = self.fields[FieldIndex::Port as usize].value.parse().unwrap_or(22);
         let or_dash = |s: &str| if s.is_empty() { "-".to_string() } else { s.to_string() };
 
         Machine {
             id: self.target_id.unwrap_or(0),
             num: self.num,
-            ip: or_dash(&self.fields[0].value),
-            nat_ip: or_dash(&self.fields[1].value),
+            ip: or_dash(&self.fields[FieldIndex::Ip as usize].value),
+            nat_ip: or_dash(&self.fields[FieldIndex::NatIp as usize].value),
             port,
-            username: or_dash(&self.fields[3].value),
-            password: or_dash(&self.fields[4].value),
-            private_key_path: or_dash(&self.fields[5].value),
-            device: or_dash(&self.fields[6].value),
-            remark: or_dash(&self.fields[7].value),
+            username: or_dash(&self.fields[FieldIndex::Username as usize].value),
+            password: or_dash(&self.fields[FieldIndex::Password as usize].value),
+            private_key_path: or_dash(&self.fields[FieldIndex::PrivateKey as usize].value),
+            device: or_dash(&self.fields[FieldIndex::Device as usize].value),
+            remark: or_dash(&self.fields[FieldIndex::Remark as usize].value),
         }
     }
 }

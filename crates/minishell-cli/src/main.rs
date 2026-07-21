@@ -60,7 +60,7 @@ fn open_db() -> Result<Store> {
     Ok(store)
 }
 
-fn pad_str(s: &str, width: usize, align_left: bool) -> String {
+fn pad_cell(s: &str, width: usize, align_left: bool) -> String {
     if align_left {
         pad_right(s, width)
     } else {
@@ -105,7 +105,7 @@ fn print_machines(machines: &[Machine]) {
     }).collect();
 
     let header: String = col_meta.iter().zip(&widths)
-        .map(|((name, left), w)| pad_str(name, *w, *left))
+        .map(|((name, left), w)| pad_cell(name, *w, *left))
         .collect::<Vec<_>>()
         .join("  ");
     println!("{}", header);
@@ -113,7 +113,7 @@ fn print_machines(machines: &[Machine]) {
 
     for row in &rows {
         let line: String = row.iter().zip(col_meta.iter().zip(&widths))
-            .map(|(val, ((_, left), w))| pad_str(val, *w, *left))
+            .map(|(val, ((_, left), w))| pad_cell(val, *w, *left))
             .collect::<Vec<_>>()
             .join("  ");
         println!("{}", line);
