@@ -68,23 +68,25 @@ fn run_session_loop(channel: &mut ssh2::Channel, session_fd: RawFd) -> SessionEn
             return SessionEnd::Disconnected;
         }
 
-        let remote_events = pollfds[1].revents;
-        if remote_events & (libc::POLLHUP | libc::POLLERR) != 0 {
-            return SessionEnd::Disconnected;
-        }
-        if remote_events & libc::POLLIN != 0 {
+        // Always drain SSH data — not gated on POLLIN.
+        // libssh2 may have data buffered internally even when poll()
+        // on the raw socket fd returns no POLLIN (the kernel buffer
+        // was already consumed by libssh2's transport layer).
+        loop {
             match channel.read(&mut ssh_buf) {
                 Ok(0) => return SessionEnd::Normal,
                 Ok(n) => {
                     let _ = stdout.write_all(&ssh_buf[..n]);
                     let _ = stdout.flush();
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => return SessionEnd::Disconnected,
             }
-            if channel.eof() {
-                return SessionEnd::Normal;
-            }
+        }
+
+        // Check disconnection AFTER draining any buffered data
+        if pollfds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            return SessionEnd::Disconnected;
         }
 
         let stdin_events = pollfds[0].revents;
