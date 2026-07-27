@@ -31,19 +31,20 @@ enum SessionEnd {
     Disconnected,
 }
 
-fn run_session_loop(channel: &mut ssh2::Channel, session_fd: RawFd) -> SessionEnd {
+fn run_session_loop(channel: &mut ssh2::Channel, session: &ssh2::Session, session_fd: RawFd) -> SessionEnd {
     let stdin_fd = libc::STDIN_FILENO;
 
     let mut stdin_buf = [0u8; 4096];
     let mut ssh_buf = [0u8; 4096];
     let mut stdout = std::io::stdout();
     let mut stdin = std::io::stdin();
-    let connect_start = Instant::now();
-    let max_duration = Duration::from_secs(3600);
+    let mut last_keepalive = Instant::now();
+    let keepalive_interval = Duration::from_secs(120);
 
     loop {
-        if connect_start.elapsed() > max_duration {
-            return SessionEnd::Normal;
+        if last_keepalive.elapsed() >= keepalive_interval {
+            let _ = session.keepalive_send();
+            last_keepalive = Instant::now();
         }
 
         // Handle terminal resize
@@ -183,6 +184,17 @@ pub fn create_session(config: &ConnectConfig) -> Result<ssh2::Session> {
     for parsed_addr in &addrs {
         match TcpStream::connect_timeout(parsed_addr, config.timeout) {
             Ok(tcp) => {
+                let fd = tcp.as_raw_fd();
+                let keepalive: libc::c_int = 1;
+                let _ = unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_KEEPALIVE,
+                        &keepalive as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
                 let mut session = ssh2::Session::new().context("Failed to create SSH session")?;
                 session.set_tcp_stream(tcp);
                 session.handshake().context("SSH handshake failed")?;
@@ -239,8 +251,9 @@ fn try_session(
     }
 
     session.set_blocking(false);
+    session.set_keepalive(true, 120);
 
-    Ok(run_session_loop(&mut channel, session_fd))
+    Ok(run_session_loop(&mut channel, &session, session_fd))
 }
 
 pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
