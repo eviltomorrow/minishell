@@ -115,18 +115,14 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
         libc::signal(libc::SIGWINCH, handle_sigwinch as *const () as libc::sighandler_t);
     }
 
+    // Phase 1: Establish SSH session (raw mode OFF — Ctrl+C generates SIGINT)
+    let (mut channel, session, session_fd) = prepare_session(config, &term)?;
+
+    // Phase 2: Enable raw mode for PTY interaction
     let _ = crossterm::terminal::enable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
 
-    // Initial connection — fail fast, no retry
-    let outcome = try_session(config, &term);
-    let mut outcome = match outcome {
-        Ok(o) => o,
-        Err(e) => {
-            let _ = crossterm::terminal::disable_raw_mode();
-            return Err(e);
-        }
-    };
+    let mut outcome = run_session_loop(&mut channel, &session, session_fd);
 
     // Reconnection loop — only retry if session was established and then lost
     let max_retries = 3;
@@ -150,9 +146,20 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
                 );
                 let _ = std::io::stdout().write_all(msg.as_bytes());
                 let _ = std::io::stdout().flush();
-                let _ = crossterm::event::read();
-                outcome = match try_session(config, &term) {
-                    Ok(o) => o,
+
+                match crossterm::event::read() {
+                    Ok(crossterm::event::Event::Key(key))
+                        if key.code == crossterm::event::KeyCode::Char('c')
+                            && key.modifiers == crossterm::event::KeyModifiers::CONTROL =>
+                    {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        anyhow::bail!("Connection cancelled.");
+                    }
+                    _ => {}
+                }
+
+                outcome = match prepare_session(config, &term) {
+                    Ok((mut ch, sess, fd)) => run_session_loop(&mut ch, &sess, fd),
                     Err(e) => {
                         let _ = crossterm::terminal::disable_raw_mode();
                         return Err(e);
@@ -197,6 +204,7 @@ pub fn create_session(config: &ConnectConfig) -> Result<ssh2::Session> {
                 };
                 let mut session = ssh2::Session::new().context("Failed to create SSH session")?;
                 session.set_tcp_stream(tcp);
+                session.set_timeout(config.timeout.as_millis() as u32);
                 session.handshake().context("SSH handshake failed")?;
 
                 if !config.private_key_path.is_empty() {
@@ -230,10 +238,10 @@ pub fn create_session(config: &ConnectConfig) -> Result<ssh2::Session> {
     Err(last_err)
 }
 
-fn try_session(
+fn prepare_session(
     config: &ConnectConfig,
     term: &str,
-) -> Result<SessionEnd> {
+) -> Result<(ssh2::Channel, ssh2::Session, RawFd)> {
     let session = create_session(config)?;
     let session_fd = session.as_raw_fd();
 
@@ -253,7 +261,7 @@ fn try_session(
     session.set_blocking(false);
     session.set_keepalive(true, 120);
 
-    Ok(run_session_loop(&mut channel, &session, session_fd))
+    Ok((channel, session, session_fd))
 }
 
 pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
@@ -278,7 +286,7 @@ pub fn login_to_machine(machine: &Machine) -> Result<Duration> {
         private_key_path: if machine.private_key_path == "-" { String::new() } else { machine.private_key_path.clone() },
         host: host.to_string(),
         port: machine.port,
-        timeout: Duration::from_secs(5),
+        timeout: Duration::from_secs(10),
         device: machine.device.clone(),
     };
 
