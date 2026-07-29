@@ -517,7 +517,9 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
                     form.error = Some(err.to_string());
                 } else {
                     form.error = None;
-                    form.num = state.store.count_all().unwrap_or(0) as i32 + 1;
+                    if !form.is_edit {
+                        form.num = state.store.count_all().unwrap_or(0) as i32 + 1;
+                    }
                     let machine = form.to_machine();
                     let result = if form.is_edit {
                         state.store.update_machine(&machine).map_err(|e| e)
