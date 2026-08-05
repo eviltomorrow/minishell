@@ -215,8 +215,11 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
 
     // Title
     let title = Line::from(vec![
+        Span::styled("▌", Style::default().fg(Color::Cyan)),
         Span::styled(" minishell ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{} machines", state.machines.len()), Style::default().fg(Color::Gray)),
+        Span::styled("▐", Style::default().fg(Color::Cyan)),
+        Span::styled(format!(" {} machines  ", state.machines.len()), Style::default().fg(Color::Gray)),
+        Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(title, main_chunks[0]);
 
@@ -246,7 +249,20 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     state.table.set_size(content_chunks[1].width, table_height);
     let selected_style = styles::selected_style();
     let normal_style = Style::default();
-    state.table.render(content_chunks[1], f.buffer_mut(), selected_style, normal_style);
+    if state.machines.is_empty() {
+        let hint = if !state.search_input.is_empty() {
+            "没有匹配的机器 — 按 / 重新搜索，Esc 清空".to_string()
+        } else {
+            "仓库为空 — 按 a 添加第一台机器，或用 minishell import <file.xlsx> 导入".to_string()
+        };
+        let hint_w = UnicodeWidthStr::width(hint.as_str()) as u16;
+        let x = content_chunks[1].x + content_chunks[1].width.saturating_sub(hint_w) / 2;
+        let y = content_chunks[1].y + content_chunks[1].height / 2;
+        let line = Line::from(Span::styled(hint, styles::help_style()));
+        f.buffer_mut().set_line(x, y, &line, content_chunks[1].width);
+    } else {
+        state.table.render(content_chunks[1], f.buffer_mut(), selected_style, normal_style);
+    }
 
     // Separator (same length as header)
     let sep2 = Line::from(vec![Span::styled("─".repeat(area.width as usize), styles::separator_style())]);
@@ -255,29 +271,35 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
     // Status + Help bar (single line, left-right split)
     let mut status_spans: Vec<Span> = vec![];
     let probe_done = state.probe.as_ref().map_or(true, |p| p.is_done());
+    let total = state.machines.len();
     let ok_count = state
         .machines
         .iter()
         .filter(|m| matches!(state.status.get(&m.id), Some(r) if r.status == ProbeStatus::Ok))
         .count();
-    let total = state.machines.len();
+    let down_count = state
+        .machines
+        .iter()
+        .filter(|m| matches!(state.status.get(&m.id), Some(r) if r.status == ProbeStatus::Down))
+        .count();
+    let unprobed = total - ok_count - down_count;
     let (summary_text, summary_style) = if !probe_done {
         ("探测中…".to_string(), styles::status_sep_style())
     } else if total == 0 {
         ("0/0 可达".to_string(), styles::status_style())
     } else if ok_count == total {
         (
-            format!("{}/{} 可达", ok_count, total),
+            format!("{}/{} 可达 · {} 不可达 · {} 未测", ok_count, total, down_count, unprobed),
             styles::search_style(),
         )
     } else if ok_count > 0 {
         (
-            format!("{}/{} 可达", ok_count, total),
+            format!("{}/{} 可达 · {} 不可达 · {} 未测", ok_count, total, down_count, unprobed),
             Style::default().fg(Color::Yellow),
         )
     } else {
         (
-            format!("0/{} 可达", total),
+            format!("0/{} 可达 · {} 不可达 · {} 未测", total, down_count, unprobed),
             Style::default().fg(Color::Red),
         )
     };
@@ -378,6 +400,7 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
         render_delete_confirm(f, dialog_area, &del_state.target);
     }
 }
+
 
 fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
     let title = if form_state.is_edit { " Edit Machine " } else { " Add Machine " };

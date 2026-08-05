@@ -204,10 +204,17 @@ const PROBE_DOTS: usize = 5;
 
 pub fn status_cell(result: Option<&ProbeResult>, probing: bool, phase: usize) -> (String, Style) {
     match result {
-        Some(r) if r.status == ProbeStatus::Ok => (
-            format!("● {}ms", r.latency_ms.unwrap_or(0)),
-            Style::default().fg(Color::Green),
-        ),
+        Some(r) if r.status == ProbeStatus::Ok => {
+            let ms = r.latency_ms.unwrap_or(0);
+            let color = if ms < 100 {
+                Color::Green
+            } else if ms < 500 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            (format!("● {}ms", ms), Style::default().fg(color))
+        }
         Some(_) => ("● down".to_string(), Style::default().fg(Color::Red)),
         None if probing => {
             let lit = phase % PROBE_DOTS;
