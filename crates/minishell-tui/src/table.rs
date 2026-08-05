@@ -1,9 +1,10 @@
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::buffer::Buffer;
 use unicode_width::UnicodeWidthStr;
 use minishell_utils::pad_right;
+use minishell_ssh::probe::{ProbeResult, ProbeStatus};
 
 #[derive(Clone)]
 pub struct Column {
@@ -14,6 +15,8 @@ pub struct Column {
 pub struct MachineTable {
     pub columns: Vec<Column>,
     pub rows: Vec<Vec<String>>,
+    pub status_col: usize,
+    pub status_styles: Vec<Style>,
     pub cursor: usize,
     pub width: u16,
     pub height: u16,
@@ -24,10 +27,17 @@ impl MachineTable {
         MachineTable {
             columns,
             rows: Vec::new(),
+            status_col: 0,
+            status_styles: Vec::new(),
             cursor: 0,
             width: 0,
             height: 0,
         }
+    }
+
+    pub fn set_status(&mut self, status_col: usize, styles: Vec<Style>) {
+        self.status_col = status_col;
+        self.status_styles = styles;
     }
 
     pub fn set_size(&mut self, w: u16, h: u16) {
@@ -114,7 +124,12 @@ impl MachineTable {
             let mut spans = Vec::new();
             for (j, col) in self.columns.iter().enumerate() {
                 let text = self.rows[row_idx].get(j).map(|s| s.as_str()).unwrap_or("");
-                spans.push(Span::styled(pad_right(text, col.width), style));
+                let cell_style = if j == self.status_col {
+                    self.status_styles.get(row_idx).copied().unwrap_or_default().patch(style)
+                } else {
+                    style
+                };
+                spans.push(Span::styled(pad_right(text, col.width), cell_style));
             }
             let line = Line::from(spans);
             buf.set_line(area.x, y, &line, area.width);
@@ -161,6 +176,7 @@ pub fn default_columns() -> Vec<Column> {
         Column { title: "User".into(),    width: 10 },
         Column { title: "Device".into(),  width: 10 },
         Column { title: "Remark".into(),  width: 20 },
+        Column { title: "".into(),        width: 9  },
     ]
 }
 
@@ -178,10 +194,31 @@ pub fn secrets_columns() -> Vec<Column> {
         Column { title: "Device".into(),  width: 10 },
         Column { title: "".into(),        width: 1  },
         Column { title: "Remark".into(),  width: 16 },
+        Column { title: "".into(),        width: 9  },
     ]
 }
 
 const COL_GAP: usize = 2;
+
+const PROBE_DOTS: usize = 5;
+
+pub fn status_cell(result: Option<&ProbeResult>, probing: bool, phase: usize) -> (String, Style) {
+    match result {
+        Some(r) if r.status == ProbeStatus::Ok => (
+            format!("● {}ms", r.latency_ms.unwrap_or(0)),
+            Style::default().fg(Color::Green),
+        ),
+        Some(_) => ("● down".to_string(), Style::default().fg(Color::Red)),
+        None if probing => {
+            let lit = phase % PROBE_DOTS;
+            let dots: String = (0..PROBE_DOTS)
+                .map(|i| if i == lit { '▪' } else { '▫' })
+                .collect();
+            (dots, Style::default().fg(Color::DarkGray))
+        }
+        None => ("·".to_string(), Style::default().fg(Color::DarkGray)),
+    }
+}
 
 pub fn auto_column_widths(columns: &[Column], rows: &[Vec<String>]) -> Vec<Column> {
     columns.iter().enumerate().map(|(i, col)| {

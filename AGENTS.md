@@ -69,3 +69,17 @@ Built with `env!("CARGO_PKG_VERSION")`, compile-time `GIT_SHA` and `BUILD_TIME` 
 - Form fields use `FieldIndex` enum (in `form.rs`) — never use raw integer indices
 - File browser is split into `mod.rs` (state/logic), `input.rs` (key handling), `view.rs` (rendering)
 - `minishell-server` integration tests have 3 pre-existing failures (config loading behavior mismatch)
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature>/` in this repo. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

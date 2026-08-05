@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::event::{EnableBracketedPaste, DisableBracketedPaste};
 use ratatui::backend::CrosstermBackend;
@@ -11,9 +12,10 @@ use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 use minishell_core::Machine;
 use minishell_store::Store;
+use minishell_ssh::probe::{self, ProbeHandle, ProbeResult, ProbeStatus};
 
 use super::form::{FormState, DeleteState, FieldIndex};
-use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths};
+use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths, status_cell};
 use super::filebrowser::FileBrowserState;
 use super::styles;
 
@@ -29,6 +31,9 @@ pub struct AppState {
     pub filebrowser: Option<FileBrowserState>,
     pub should_quit: bool,
     pub login_target: Option<Machine>,
+    pub status: HashMap<i64, ProbeResult>,
+    pub probe: Option<ProbeHandle>,
+    pub probe_start: Option<Instant>,
 }
 
 pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
@@ -69,10 +74,21 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
         filebrowser: None,
         should_quit: false,
         login_target: None,
+        status: HashMap::new(),
+        probe: None,
+        probe_start: None,
     };
 
     // Initial table data
     rebuild_table(&mut state);
+
+    // Kick off startup probe on the full machine list (non-blocking)
+    state.probe_start = Some(Instant::now());
+    state.probe = Some(probe::start_probe(
+        &state.machines,
+        probe::DEFAULT_WORKERS,
+        probe::PROBE_TIMEOUT,
+    ));
 
     loop {
         if let Some(machine) = state.login_target.take() {
@@ -104,12 +120,19 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                 }
             }
         } else {
+            poll_probe(&mut state);
+            let probing = !state.probe.as_ref().map_or(true, |p| p.is_done());
+            if probing {
+                rebuild_table(&mut state);
+            }
             terminal.draw(|f| view(f, &mut state))?;
 
-            match event::read()? {
-                Event::Key(key) => update(&mut state, key),
-                Event::Paste(data) => handle_paste(&mut state, &data),
-                _ => {}
+            if crossterm::event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) => update(&mut state, key),
+                    Event::Paste(data) => handle_paste(&mut state, &data),
+                    _ => {}
+                }
             }
         }
 
@@ -123,18 +146,46 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
     Ok(())
 }
 
-fn rebuild_table(state: &mut AppState) {
-    let rows: Vec<Vec<String>> = state.machines.iter()
-        .map(|m| format_machine_row(m, state.show_secrets))
-        .collect();
+fn poll_probe(state: &mut AppState) {
+    let mut updates: Vec<(i64, ProbeResult)> = Vec::new();
+    if let Some(handle) = &state.probe {
+        while let Some(pair) = handle.try_recv() {
+            updates.push(pair);
+        }
+    }
+    if !updates.is_empty() {
+        for (id, result) in updates {
+            state.status.insert(id, result);
+        }
+        rebuild_table(state);
+    }
+}
 
+fn rebuild_table(state: &mut AppState) {
     let columns = if state.show_secrets {
         secrets_columns()
     } else {
         default_columns()
     };
+    let probing = !state.probe.as_ref().map_or(true, |p| p.is_done());
+    let phase = state
+        .probe_start
+        .map(|start| start.elapsed().as_millis() as usize / 150)
+        .unwrap_or(0);
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(state.machines.len());
+    let mut status_styles: Vec<Style> = Vec::with_capacity(state.machines.len());
+    for m in &state.machines {
+        let mut row = format_machine_row(m, state.show_secrets);
+        let (text, style) = status_cell(state.status.get(&m.id), probing, phase);
+        row.push(text);
+        status_styles.push(style);
+        rows.push(row);
+    }
+
+    let status_col = columns.len() - 1;
     state.table.columns = auto_column_widths(&columns, &rows);
     state.table.set_rows(rows);
+    state.table.set_status(status_col, status_styles);
 }
 
 fn view(f: &mut ratatui::Frame, state: &mut AppState) {
@@ -203,6 +254,35 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
 
     // Status + Help bar (single line, left-right split)
     let mut status_spans: Vec<Span> = vec![];
+    let probe_done = state.probe.as_ref().map_or(true, |p| p.is_done());
+    let ok_count = state
+        .machines
+        .iter()
+        .filter(|m| matches!(state.status.get(&m.id), Some(r) if r.status == ProbeStatus::Ok))
+        .count();
+    let total = state.machines.len();
+    let (summary_text, summary_style) = if !probe_done {
+        ("探测中…".to_string(), styles::status_sep_style())
+    } else if total == 0 {
+        ("0/0 可达".to_string(), styles::status_style())
+    } else if ok_count == total {
+        (
+            format!("{}/{} 可达", ok_count, total),
+            styles::search_style(),
+        )
+    } else if ok_count > 0 {
+        (
+            format!("{}/{} 可达", ok_count, total),
+            Style::default().fg(Color::Yellow),
+        )
+    } else {
+        (
+            format!("0/{} 可达", total),
+            Style::default().fg(Color::Red),
+        )
+    };
+    let summary_span = Span::styled(summary_text, summary_style);
+    let summary_sep = Span::styled("  │  ", styles::status_sep_style());
     if let Some(m) = state.machines.get(state.table.cursor()) {
         status_spans.push(Span::styled(format!("{}/{}", state.table.cursor() + 1, state.machines.len()), styles::status_style()));
         status_spans.push(Span::styled(" │ ", styles::status_sep_style()));
@@ -220,6 +300,8 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
         status_spans.push(Span::styled(" │ ", styles::status_sep_style()));
         status_spans.push(Span::styled("no machines", styles::status_sep_style()));
     }
+    status_spans.push(summary_sep);
+    status_spans.push(summary_span);
 
     let help_items: Vec<(&str, &str)> = if state.search_focused {
         vec![
