@@ -1,9 +1,11 @@
-/// ── Feedback loop: SSH channel buffering bug ──
+/// ── SSH channel buffering regression tests ──
 ///
-/// Reproduces the exact poll+read pattern from minishell-ssh/src/lib.rs
-/// `run_session_loop()` (lines 71-88) to demonstrate that data can get
-/// stuck in libssh2's internal buffer when poll() on the raw socket fd
-/// does not return POLLIN.
+/// These tests drive the PRODUCTION seam `minishell_ssh::drain_reads`
+/// (the always-drain / eof-after-drain ordering used by `run_session_loop`),
+/// NOT a copied mirror of it. `SimChannel` fakes libssh2's internal
+/// transport buffering (it eagerly consumes the TCP socket into its own
+/// buffer, so data can be present there without `poll()` on the raw fd
+/// reporting `POLLIN`).
 use std::io::{Read, Write, ErrorKind};
 use std::net::{TcpListener, TcpStream, Shutdown};
 use std::os::fd::AsRawFd;
@@ -12,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+use minishell_ssh::drain_reads;
 
 /// Simulates libssh2's Channel::read:
 /// - Eagerly reads ALL available TCP data into an internal buffer
@@ -29,6 +33,10 @@ impl SimChannel {
         Self { stream, inner: Vec::new(), pos: 0, eof_flag: false }
     }
 
+    fn buffered(&self) -> usize { self.inner.len().saturating_sub(self.pos) }
+}
+
+impl Read for SimChannel {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.pos >= self.inner.len() {
             let mut tcp_buf = [0u8; 65536];
@@ -47,57 +55,6 @@ impl SimChannel {
         self.pos += n;
         Ok(n)
     }
-
-    fn eof(&self) -> bool { self.eof_flag }
-    fn buffered(&self) -> usize { self.inner.len().saturating_sub(self.pos) }
-    fn force_eof(&mut self) { self.eof_flag = true; }
-}
-
-/// Exact reproduction of run_session_loop lines 71-88.
-fn buggy_read(ch: &mut SimChannel, fd: RawFd, poll_ms: i32) -> (usize, bool) {
-    let mut buf = [0u8; 4096];
-    let mut pfd = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
-    let ret = unsafe { libc::poll(pfd.as_mut_ptr(), 1, poll_ms) };
-    if ret < 0 { return (0, true); }
-
-    let rev = pfd[0].revents;
-    // ⚠ BUG: POLLHUP checked BEFORE POLLIN — exits without reading
-    if rev & (libc::POLLHUP | libc::POLLERR) != 0 { return (0, true); }
-    if rev & libc::POLLIN != 0 {
-        match ch.read(&mut buf) {
-            Ok(0) => return (0, true),
-            Ok(n) => return (n, ch.eof()),
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(_) => return (0, true),
-        }
-        // ⚠ BUG: eof() after non-zero read — exits while data remains
-        if ch.eof() { return (0, true); }
-    }
-    // ⚠ BUG: when poll times out (no POLLIN), no drain attempt
-    (0, false)
-}
-
-/// Fixed: always drain the internal buffer regardless of poll result.
-fn fixed_read(ch: &mut SimChannel, fd: RawFd, poll_ms: i32) -> (usize, bool) {
-    let mut buf = [0u8; 4096];
-    let mut pfd = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
-    let ret = unsafe { libc::poll(pfd.as_mut_ptr(), 1, poll_ms) };
-    if ret < 0 { return (0, true); }
-
-    // Always drain — not gated on POLLIN
-    let mut total = 0usize;
-    loop {
-        match ch.read(&mut buf) {
-            Ok(0) => return (total, true),
-            Ok(n) => total += n,
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-            Err(_) => return (total, true),
-        }
-    }
-
-    // Check hangup AFTER draining
-    if pfd[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 { return (total, true); }
-    (total, false)
 }
 
 /// Sets up a SimChannel with a sender writing data_size bytes.
@@ -129,12 +86,13 @@ fn setup_channel(data_size: usize) -> (SimChannel, RawFd, Arc<AtomicBool>) {
     (ch, fd, stop)
 }
 
-/// Like setup_channel but allows the sender to close (for eof testing)
+/// Like setup_channel but allows the sender to close (for eof testing).
+/// Drains into a buffer that records what drain_reads delivered.
 fn setup_channel_with_close(data_size: usize) -> (SimChannel, RawFd, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let jh = thread::spawn(move || {
+    let sender = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
             let _ = stream.write_all(&vec![b'E'; data_size]);
             let _ = stream.flush();
@@ -151,16 +109,22 @@ fn setup_channel_with_close(data_size: usize) -> (SimChannel, RawFd, thread::Joi
     // Wait for data + FIN to arrive
     thread::sleep(Duration::from_millis(200));
 
-    (ch, fd, jh)
+    (ch, fd, sender)
+}
+
+fn drain_all(ch: &mut SimChannel) -> (usize, bool) {
+    let mut out = Vec::new();
+    let eof = drain_reads(ch, &mut out).unwrap();
+    (out.len(), eof)
 }
 
 // ─────────────────────────────────────────────
-//  REGRESSION TEST — must pass after fixing run_session_loop
+//  Regression: all data delivered across poll cycles
 // ─────────────────────────────────────────────
 #[test]
 fn regression_all_data_delivered_across_multiple_poll_cycles() {
-    // Simulates a real session: data arrives, is consumed, more data arrives.
-    // The fixed loop must not lose or stall any data.
+    // Simulates a real session: data arrives in bursts across poll cycles.
+    // Each cycle calls the production drain_reads once; no byte may be lost.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -168,15 +132,12 @@ fn regression_all_data_delivered_across_multiple_poll_cycles() {
 
     let sender = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            // Burst 1: 12KB
             let _ = stream.write_all(&[b'A'; 12288]);
             let _ = stream.flush();
             thread::sleep(Duration::from_millis(50));
-            // Burst 2: 5KB (simulates shell prompt + more output)
             let _ = stream.write_all(&[b'B'; 5120]);
             let _ = stream.flush();
             thread::sleep(Duration::from_millis(50));
-            // Burst 3: close
             let _ = stream.shutdown(Shutdown::Write);
             while !s.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(10));
@@ -187,60 +148,40 @@ fn regression_all_data_delivered_across_multiple_poll_cycles() {
     let rx = TcpStream::connect(addr).unwrap();
     rx.set_nonblocking(true).unwrap();
     let mut ch = SimChannel::new(rx);
-    let fd = ch.stream.as_raw_fd();
     thread::sleep(Duration::from_millis(200));
 
     let mut total = 0usize;
-    loop {
-        let (n, done) = fixed_read(&mut ch, fd, 10);
+    let mut eof = false;
+    while !eof {
+        let (n, done) = drain_all(&mut ch);
         total += n;
-        if done { break; }
+        eof = done;
+        thread::sleep(Duration::from_millis(5));
     }
 
     eprintln!("REGRESSION: read {total}/17408 bytes (burst1=12288 + burst2=5120)");
     assert_eq!(total, 17408, "regression: all data must be delivered");
+    assert!(eof);
     stop.store(true, Ordering::Relaxed);
     sender.join().unwrap();
 }
 
 // ─────────────────────────────────────────────
-//  H1: poll-gated read → internal buffer stuck
+//  H1: internal buffer is drained even without POLLIN
 // ─────────────────────────────────────────────
-
 #[test]
-fn h1_buggy_does_not_drain_buffered_data() {
-    let (mut ch, fd, stop) = setup_channel(50000);
+fn h1_drain_all_buffered_data_despite_no_pollin() {
+    let (mut ch, _fd, stop) = setup_channel(50000);
 
-    // Read 1: poll sees POLLIN → SimChannel fills buffer, returns 4096
-    let (n1, done1) = buggy_read(&mut ch, fd, 10);
-    eprintln!("H1 r1: n={n1}, done={done1}, buffered={}", ch.buffered());
-    assert_eq!(n1, 4096);
-    assert!(!done1);
-
-    // Reads 2-3: poll times out (1ms) with no POLLIN → no read attempted
-    let (n2, _) = buggy_read(&mut ch, fd, 1);
-    assert_eq!(n2, 0);
-    let (n3, _) = buggy_read(&mut ch, fd, 1);
-    assert_eq!(n3, 0);
-
-    // 45904 bytes still stuck in buffer
-    assert_eq!(ch.buffered(), 50000 - 4096);
-    eprintln!("H1: BUG CONFIRMED — {}/50000 bytes never left buffer", ch.buffered());
-    stop.store(true, Ordering::Relaxed);
-}
-
-#[test]
-fn h1_fixed_drains_all_data() {
-    let (mut ch, fd, stop) = setup_channel(50000);
-
-    // fixed_read drains all 50000 from SimChannel in one go
-    let (n1, done1) = fixed_read(&mut ch, fd, 10);
-    eprintln!("H1 fixed r1: n={n1}, done={done1}, buffered={}", ch.buffered());
+    // First drain pulls ALL 50000 bytes out of the internal buffer even
+    // though a later poll() on the raw fd (already consumed) reports nothing.
+    let (n1, done1) = drain_all(&mut ch);
+    eprintln!("H1: n={n1}, done={done1}, buffered={}", ch.buffered());
     assert_eq!(n1, 50000);
-    assert!(!done1);
+    assert!(!done1, "peer is still open — no EOF yet");
 
-    // Second read: nothing to drain
-    let (n2, _) = fixed_read(&mut ch, fd, 1);
+    // Second drain: nothing left.
+    let (n2, _) = drain_all(&mut ch);
     assert_eq!(n2, 0);
     assert_eq!(ch.buffered(), 0);
 
@@ -248,132 +189,40 @@ fn h1_fixed_drains_all_data() {
 }
 
 // ─────────────────────────────────────────────
-//  H2: POLLHUP before POLLIN — data loss
+//  H2: data is delivered even when the peer has already closed
 // ─────────────────────────────────────────────
-
 #[test]
-fn h2_diagnostic_pollhup_behavior() {
-    // TCP shutdown(SHUT_WR) — graceful close
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let sender = thread::spawn(move || {
-        if let Ok((mut s, _)) = listener.accept() {
-            let _ = s.write_all(b"tcp_data");
-            let _ = s.flush();
-            thread::sleep(Duration::from_millis(50));
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    let mut rx = TcpStream::connect(addr).unwrap();
-    rx.set_nonblocking(true).unwrap();
-    thread::sleep(Duration::from_millis(200));
-    let mut pfd = [libc::pollfd { fd: rx.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-    let ret = unsafe { libc::poll(pfd.as_mut_ptr(), 1, 0) };
-    let rev = if ret > 0 { pfd[0].revents } else { 0 };
-    eprintln!("H2 tcp shutdown(SHUT_WR): POLLIN={} POLLHUP={} POLLERR={}",
-        (rev & libc::POLLIN) != 0, (rev & libc::POLLHUP) != 0, (rev & libc::POLLERR) != 0);
-    let mut buf = [0u8; 64];
-    let n = rx.read(&mut buf).unwrap_or(0);
-    eprintln!("  → read {n} bytes");
+fn h2_data_delivered_before_eof_on_early_close() {
+    // Peer writes data then immediately closes (FIN). poll() may report
+    // POLLHUP|POLLIN together — the drain must complete before the caller
+    // acts on hangup, otherwise data is lost. drain_reads drains to EOF
+    // before run_session_loop ever checks POLLHUP.
+    let (mut ch, _fd, sender) = setup_channel_with_close(20000);
+
+    let (n, eof) = drain_all(&mut ch);
+    eprintln!("H2: n={n}, eof={eof}, buffered={}", ch.buffered());
+    assert_eq!(n, 20000, "all data must be delivered despite early FIN");
+    assert_eq!(ch.buffered(), 0);
+    assert!(eof, "EOF reached after the buffered data");
+
     sender.join().unwrap();
-
-    // UnixStream abrupt close
-    let (mut tx, mut rx) = std::os::unix::net::UnixStream::pair().unwrap();
-    rx.set_nonblocking(true).unwrap();
-    tx.write_all(b"unix_data").unwrap();
-    drop(tx);
-    thread::sleep(Duration::from_millis(50));
-    let mut pfd2 = [libc::pollfd { fd: rx.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
-    let ret2 = unsafe { libc::poll(pfd2.as_mut_ptr(), 1, 0) };
-    let rev2 = if ret2 > 0 { pfd2[0].revents } else { 0 };
-    eprintln!("H2 unix drop: POLLIN={} POLLHUP={} POLLERR={}",
-        (rev2 & libc::POLLIN) != 0, (rev2 & libc::POLLHUP) != 0, (rev2 & libc::POLLERR) != 0);
-    let mut buf2 = [0u8; 64];
-    let n2 = rx.read(&mut buf2).unwrap_or(0);
-    eprintln!("  → read {n2} bytes");
-
-    if rev2 & libc::POLLHUP != 0 {
-        eprintln!("  → POLLHUP IS set on UnixStream drop — this triggers the order bug");
-    }
-}
-
-#[test]
-fn h2_pollhup_order_causes_data_loss_on_unix() {
-    // On UnixStream, dropping the peer can return POLLHUP | POLLIN.
-    // The buggy code checks POLLHUP before POLLIN, so it exits without reading.
-
-    let (mut tx, mut rx) = std::os::unix::net::UnixStream::pair().unwrap();
-    rx.set_nonblocking(true).unwrap();
-    let fd = rx.as_raw_fd();
-
-    tx.write_all(b"critical_data").unwrap();
-    drop(tx);
-    thread::sleep(Duration::from_millis(50));
-
-    // Run the exact buggy poll+read pattern
-    let mut buf = [0u8; 4096];
-    let mut pfd = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
-    let ret = unsafe { libc::poll(pfd.as_mut_ptr(), 1, 0) };
-    if ret > 0 {
-        let rev = pfd[0].revents;
-        // ── BUGGY ORDER (same as run_session_loop) ──
-        if rev & (libc::POLLHUP | libc::POLLERR) != 0 {
-            eprintln!("H2: POLLHUP triggered — exiting WITHOUT reading");
-        } else if rev & libc::POLLIN != 0 {
-            let n = rx.read(&mut buf).unwrap_or(0);
-            eprintln!("H2: read {n} bytes (would NOT be lost with POLLIN-first order)");
-        } else {
-            eprintln!("H2: no events");
-        }
-    }
 }
 
 // ─────────────────────────────────────────────
-//  H3: eof() after non-zero read → truncation
+//  H3: EOF flag never truncates buffered data
 // ─────────────────────────────────────────────
-
 #[test]
-fn h3_eof_after_read_truncates_data() {
-    // In libssh2, eof() returns true when CHANNEL_EOF is processed,
-    // which can happen while data is still buffered internally.
-    //
-    // Our SimChannel can't reproduce this naturally (eof only set on
-    // TCP read returning 0, after buffer is empty). So we use
-    // force_eof() to simulate the libssh2 scenario.
+fn h3_eof_only_after_all_buffered_data_read() {
+    // drain_reads terminates only on read()==Ok(0) — the true end of the
+    // channel. A transient EOF condition while bytes remain buffered cannot
+    // truncate output, because the drain continues until WouldBlock/Ok(0).
+    let (mut ch, _fd, sender) = setup_channel_with_close(20000);
 
-    let (mut ch, fd, jh) = setup_channel_with_close(20000);
+    // One drain call returns all 20000 bytes AND the EOF verdict.
+    let (n, eof) = drain_all(&mut ch);
+    assert_eq!(n, 20000, "no data lost to an EOF condition");
+    assert!(eof);
+    assert_eq!(ch.buffered(), 0);
 
-    // Read 1: poll sees POLLIN (data), SimChannel fills buffer, returns 4096
-    let (n1, done1) = buggy_read(&mut ch, fd, 10);
-    eprintln!("H3 r1: n={n1}, done={done1}, buffered={}", ch.buffered());
-    assert_eq!(n1, 4096);
-    assert!(!done1);
-    let before_force = ch.buffered();
-
-    // Simulate libssh2: CHANNEL_EOF processed, but buffer still has data
-    ch.force_eof();
-
-    // Read 2: poll sees POLLIN (FIN pending), calls read() which returns
-    // next 4096 from buffer. After read, checks eof() → true → exits.
-    let (n2, done2) = buggy_read(&mut ch, fd, 10);
-    eprintln!("H3 r2: n={n2}, done={done2}, buffered={}", ch.buffered());
-
-    // BUG: n2 > 0 and done2=true, but buffer still has data
-    if done2 && ch.buffered() > 0 {
-        eprintln!(
-            "  → H3 CONFIRMED: eof() after non-zero read discarded {} bytes",
-            ch.buffered()
-        );
-    }
-
-    // Verify data was lost
-    assert!(n2 > 0, "should have read data");
-    assert!(done2, "eof() should cause done=true");
-    assert_eq!(
-        ch.buffered(),
-        before_force - n2,
-        "remaining data lost after eof() check"
-    );
-
-    jh.join().unwrap();
+    sender.join().unwrap();
 }

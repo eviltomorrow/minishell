@@ -1,4 +1,5 @@
 use minishell_core::Machine;
+use minishell_store::Store;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum FieldIndex {
@@ -233,6 +234,106 @@ impl FormState {
             remark: or_dash(&self.fields[FieldIndex::Remark as usize].value),
         }
     }
+
+    pub fn move_left(&mut self) {
+        let field = &mut self.fields[self.step];
+        if let Some(ref options) = field.select_options {
+            if field.select_index > 0 {
+                field.select_index -= 1;
+                field.value = options[field.select_index].clone();
+            }
+        } else {
+            field.move_cursor_left();
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        let field = &mut self.fields[self.step];
+        if let Some(ref options) = field.select_options {
+            let len = options.len();
+            if field.select_index < len.saturating_sub(1) {
+                field.select_index += 1;
+                field.value = options[field.select_index].clone();
+            }
+        } else {
+            field.move_cursor_right();
+        }
+    }
+
+    pub fn delete_current(&mut self) {
+        if self.fields[self.step].select_options.is_none() {
+            self.fields[self.step].delete_char();
+        }
+    }
+
+    fn check_insert_rules(&self, c: char) -> Result<(), &'static str> {
+        let idx = self.step;
+        if self.fields[idx].select_options.is_some() {
+            return Ok(());
+        }
+        if c == ' '
+            && idx != FieldIndex::Password as usize
+            && idx != FieldIndex::PrivateKey as usize
+        {
+            return Err("不能包含空格");
+        }
+        if idx == FieldIndex::Port as usize && !c.is_ascii_digit() {
+            return Err("端口只能输入数字");
+        }
+        Ok(())
+    }
+
+    pub fn insert_current(&mut self, c: char) -> Result<(), &'static str> {
+        self.check_insert_rules(c)?;
+        self.fields[self.step].insert_char(c);
+        Ok(())
+    }
+
+    pub fn insert_current_str(&mut self, s: &str) -> Result<(), &'static str> {
+        let idx = self.step;
+        if self.fields[idx].select_options.is_some() {
+            return Ok(());
+        }
+        if s.contains(' ')
+            && idx != FieldIndex::Password as usize
+            && idx != FieldIndex::PrivateKey as usize
+        {
+            return Err("不能包含空格");
+        }
+        if idx == FieldIndex::Port as usize && !s.chars().all(|c| c.is_ascii_digit()) {
+            return Err("端口只能输入数字");
+        }
+        self.fields[self.step].insert_str(s);
+        Ok(())
+    }
+
+    pub fn commit(&mut self, store: &Store) -> Result<(), String> {
+        if let Some(err) = self.validate() {
+            let msg = err.to_string();
+            self.error = Some(msg.clone());
+            return Err(msg);
+        }
+        if !self.is_edit {
+            self.num = store.max_num().unwrap_or(0) + 1;
+        }
+        let machine = self.to_machine();
+        let result = if self.is_edit {
+            store
+                .update_machine(&machine)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            store
+                .import_machines(&[machine])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        match &result {
+            Ok(_) => self.error = None,
+            Err(e) => self.error = Some(e.clone()),
+        }
+        result
+    }
 }
 
 pub struct DeleteState {
@@ -242,5 +343,114 @@ pub struct DeleteState {
 impl DeleteState {
     pub fn new(target: Machine) -> Self {
         DeleteState { target }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_store() -> Store {
+        let dir = std::env::temp_dir().join(format!(
+            "minishell-form-test-{}-{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store = Store::open(&dir).unwrap();
+        store.init().unwrap();
+        store
+    }
+
+    fn fill_add(form: &mut FormState) {
+        form.step = FieldIndex::Ip as usize;
+        form.insert_current('1').unwrap();
+        form.fields[FieldIndex::Ip as usize].value = "10.0.0.5".to_string();
+        form.fields[FieldIndex::Port as usize].value = "22".to_string();
+        form.fields[FieldIndex::Username as usize].value = "root".to_string();
+        form.fields[FieldIndex::Password as usize].value = "secret".to_string();
+    }
+
+    #[test]
+    fn insert_rules_reject_space_and_bad_port() {
+        let mut form = FormState::new_add();
+        form.step = FieldIndex::Username as usize;
+        assert!(form.insert_current(' ').is_err());
+        form.step = FieldIndex::Password as usize;
+        assert!(form.insert_current(' ').is_ok());
+        form.step = FieldIndex::Port as usize;
+        assert!(form.insert_current('a').is_err());
+        assert!(form.insert_current('2').is_ok());
+    }
+
+    #[test]
+    fn paste_rules_match_typing_rules() {
+        let mut form = FormState::new_add();
+        form.step = FieldIndex::Username as usize;
+        assert!(form.insert_current_str("a b").is_err());
+        form.step = FieldIndex::PrivateKey as usize;
+        assert!(form.insert_current_str("my key").is_ok());
+        form.step = FieldIndex::Port as usize;
+        assert!(form.insert_current_str("22").is_ok());
+        assert!(form.insert_current_str("2a").is_err());
+    }
+
+    #[test]
+    fn validate_catches_empty_fields() {
+        let mut form = FormState::new_add();
+        assert_eq!(form.validate(), Some("IP 和 NAT-IP 不能同时为空"));
+        fill_add(&mut form);
+        form.fields[FieldIndex::Username as usize].value = "-".to_string();
+        assert_eq!(form.validate(), Some("用户名不能为空"));
+    }
+
+    #[test]
+    fn commit_add_assigns_max_num_plus_one() {
+        let store = temp_store();
+        store.import_machines(&[Machine {
+            id: 0, num: 3, ip: "1.1.1.1".into(), nat_ip: "-".into(), port: 22,
+            username: "root".into(), password: "p".into(), private_key_path: "-".into(),
+            device: "-".into(), remark: "-".into(),
+        }]).unwrap();
+
+        let mut form = FormState::new_add();
+        fill_add(&mut form);
+        form.commit(&store).unwrap();
+        assert_eq!(form.num, 4);
+        let saved = store.search("10.0.0.5").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].num, 4);
+    }
+
+    #[test]
+    fn commit_edit_updates_existing_machine() {
+        let store = temp_store();
+        store.import_machines(&[Machine {
+            id: 0, num: 1, ip: "10.0.0.5".into(), nat_ip: "-".into(), port: 22,
+            username: "root".into(), password: "old".into(), private_key_path: "-".into(),
+            device: "-".into(), remark: "-".into(),
+        }]).unwrap();
+        let saved = store.search("10.0.0.5").unwrap();
+        let existing = saved[0].clone();
+
+        let mut form = FormState::new_edit(&existing);
+        form.fields[FieldIndex::Password as usize].value = "new".to_string();
+        form.commit(&store).unwrap();
+        assert_eq!(form.num, 1);
+
+        let after = store.search("10.0.0.5").unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].password, "new");
+    }
+
+    #[test]
+    fn commit_invalid_sets_error_and_keeps_form_open() {
+        let store = temp_store();
+        let mut form = FormState::new_add();
+        assert!(form.commit(&store).is_err());
+        assert!(form.error.is_some());
     }
 }

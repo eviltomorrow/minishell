@@ -1,10 +1,9 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::buffer::Buffer;
 use unicode_width::UnicodeWidthStr;
 use minishell_utils::pad_right;
-use minishell_ssh::probe::{ProbeResult, ProbeStatus};
 
 #[derive(Clone)]
 pub struct Column {
@@ -199,33 +198,6 @@ pub fn secrets_columns() -> Vec<Column> {
 }
 
 const COL_GAP: usize = 2;
-
-const PROBE_DOTS: usize = 5;
-
-pub fn status_cell(result: Option<&ProbeResult>, probing: bool, phase: usize) -> (String, Style) {
-    match result {
-        Some(r) if r.status == ProbeStatus::Ok => {
-            let ms = r.latency_ms.unwrap_or(0);
-            let color = if ms < 100 {
-                Color::Green
-            } else if ms < 500 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            (format!("● {}ms", ms), Style::default().fg(color))
-        }
-        Some(_) => ("● down".to_string(), Style::default().fg(Color::Red)),
-        None if probing => {
-            let lit = phase % PROBE_DOTS;
-            let dots: String = (0..PROBE_DOTS)
-                .map(|i| if i == lit { '▪' } else { '▫' })
-                .collect();
-            (dots, Style::default().fg(Color::DarkGray))
-        }
-        None => ("·".to_string(), Style::default().fg(Color::DarkGray)),
-    }
-}
 
 pub fn auto_column_widths(columns: &[Column], rows: &[Vec<String>]) -> Vec<Column> {
     columns.iter().enumerate().map(|(i, col)| {

@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::event::{EnableBracketedPaste, DisableBracketedPaste};
 use ratatui::backend::CrosstermBackend;
@@ -12,10 +11,10 @@ use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 use minishell_core::Machine;
 use minishell_store::Store;
-use minishell_ssh::probe::{self, ProbeHandle, ProbeResult, ProbeStatus};
 
-use super::form::{FormState, DeleteState, FieldIndex};
-use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths, status_cell};
+use super::form::{FormState, DeleteState};
+use super::table::{MachineTable, default_columns, secrets_columns, format_machine_row, auto_column_widths};
+use super::probe_state::{ProbeState, SummaryLevel};
 use super::filebrowser::FileBrowserState;
 use super::styles;
 
@@ -31,9 +30,7 @@ pub struct AppState {
     pub filebrowser: Option<FileBrowserState>,
     pub should_quit: bool,
     pub login_target: Option<Machine>,
-    pub status: HashMap<i64, ProbeResult>,
-    pub probe: Option<ProbeHandle>,
-    pub probe_start: Option<Instant>,
+    pub probe: ProbeState,
 }
 
 pub fn run(store: Arc<Store>) -> anyhow::Result<()> {
@@ -74,21 +71,14 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
         filebrowser: None,
         should_quit: false,
         login_target: None,
-        status: HashMap::new(),
-        probe: None,
-        probe_start: None,
+        probe: ProbeState::new(),
     };
 
     // Initial table data
     rebuild_table(&mut state);
 
     // Kick off startup probe on the full machine list (non-blocking)
-    state.probe_start = Some(Instant::now());
-    state.probe = Some(probe::start_probe(
-        &state.machines,
-        probe::DEFAULT_WORKERS,
-        probe::PROBE_TIMEOUT,
-    ));
+    state.probe.start(&state.machines);
 
     loop {
         if let Some(machine) = state.login_target.take() {
@@ -120,9 +110,7 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
                 }
             }
         } else {
-            poll_probe(&mut state);
-            let probing = !state.probe.as_ref().map_or(true, |p| p.is_done());
-            if probing {
+            if state.probe.poll() || !state.probe.is_done() {
                 rebuild_table(&mut state);
             }
             terminal.draw(|f| view(f, &mut state))?;
@@ -146,37 +134,17 @@ fn run_inner(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, store: 
     Ok(())
 }
 
-fn poll_probe(state: &mut AppState) {
-    let mut updates: Vec<(i64, ProbeResult)> = Vec::new();
-    if let Some(handle) = &state.probe {
-        while let Some(pair) = handle.try_recv() {
-            updates.push(pair);
-        }
-    }
-    if !updates.is_empty() {
-        for (id, result) in updates {
-            state.status.insert(id, result);
-        }
-        rebuild_table(state);
-    }
-}
-
 fn rebuild_table(state: &mut AppState) {
     let columns = if state.show_secrets {
         secrets_columns()
     } else {
         default_columns()
     };
-    let probing = !state.probe.as_ref().map_or(true, |p| p.is_done());
-    let phase = state
-        .probe_start
-        .map(|start| start.elapsed().as_millis() as usize / 150)
-        .unwrap_or(0);
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(state.machines.len());
     let mut status_styles: Vec<Style> = Vec::with_capacity(state.machines.len());
     for m in &state.machines {
         let mut row = format_machine_row(m, state.show_secrets);
-        let (text, style) = status_cell(state.status.get(&m.id), probing, phase);
+        let (text, style) = state.probe.cell_for(m.id);
         row.push(text);
         status_styles.push(style);
         rows.push(row);
@@ -270,38 +238,13 @@ fn view(f: &mut ratatui::Frame, state: &mut AppState) {
 
     // Status + Help bar (single line, left-right split)
     let mut status_spans: Vec<Span> = vec![];
-    let probe_done = state.probe.as_ref().map_or(true, |p| p.is_done());
-    let total = state.machines.len();
-    let ok_count = state
-        .machines
-        .iter()
-        .filter(|m| matches!(state.status.get(&m.id), Some(r) if r.status == ProbeStatus::Ok))
-        .count();
-    let down_count = state
-        .machines
-        .iter()
-        .filter(|m| matches!(state.status.get(&m.id), Some(r) if r.status == ProbeStatus::Down))
-        .count();
-    let unprobed = total - ok_count - down_count;
-    let (summary_text, summary_style) = if !probe_done {
-        ("探测中…".to_string(), styles::status_sep_style())
-    } else if total == 0 {
-        ("0/0 可达".to_string(), styles::status_style())
-    } else if ok_count == total {
-        (
-            format!("{}/{} 可达 · {} 不可达 · {} 未测", ok_count, total, down_count, unprobed),
-            styles::search_style(),
-        )
-    } else if ok_count > 0 {
-        (
-            format!("{}/{} 可达 · {} 不可达 · {} 未测", ok_count, total, down_count, unprobed),
-            Style::default().fg(Color::Yellow),
-        )
-    } else {
-        (
-            format!("0/{} 可达 · {} 不可达 · {} 未测", total, down_count, unprobed),
-            Style::default().fg(Color::Red),
-        )
+    let (summary_text, summary_level) = state.probe.summary(&state.machines);
+    let summary_style = match summary_level {
+        SummaryLevel::Probing => styles::status_sep_style(),
+        SummaryLevel::Empty => styles::status_style(),
+        SummaryLevel::AllOk => styles::search_style(),
+        SummaryLevel::Partial => Style::default().fg(Color::Yellow),
+        SummaryLevel::None => Style::default().fg(Color::Red),
     };
     let summary_span = Span::styled(summary_text, summary_style);
     let summary_sep = Span::styled("  │  ", styles::status_sep_style());
@@ -617,29 +560,9 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Enter => {
             if form.step == form.fields.len() - 1 {
-                // Last field - validate before save
-                if let Some(err) = form.validate() {
-                    form.error = Some(err.to_string());
-                } else {
-                    form.error = None;
-                    if !form.is_edit {
-                        form.num = state.store.count_all().unwrap_or(0) as i32 + 1;
-                    }
-                    let machine = form.to_machine();
-                    let result = if form.is_edit {
-                        state.store.update_machine(&machine).map_err(|e| e)
-                    } else {
-                        state.store.import_machines(&[machine]).map(|_| ())
-                    };
-                    match result {
-                        Ok(_) => {
-                            state.form = None;
-                            reload_machines(state);
-                        }
-                        Err(e) => {
-                            form.error = Some(e.to_string());
-                        }
-                    }
+                if form.commit(&state.store).is_ok() {
+                    state.form = None;
+                    reload_machines(state);
                 }
             } else {
                 form.error = None;
@@ -648,49 +571,21 @@ fn handle_form_key(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Left => {
             form.error = None;
-            if form.fields[form.step].select_options.is_some() {
-                let field = &mut form.fields[form.step];
-                if field.select_index > 0 {
-                    field.select_index -= 1;
-                    field.value = field.select_options.as_ref().unwrap()[field.select_index].clone();
-                }
-            } else {
-                form.fields[form.step].move_cursor_left();
-            }
+            form.move_left();
         }
         KeyCode::Right => {
             form.error = None;
-            if form.fields[form.step].select_options.is_some() {
-                let field = &mut form.fields[form.step];
-                let len = field.select_options.as_ref().unwrap().len();
-                if field.select_index < len - 1 {
-                    field.select_index += 1;
-                    field.value = field.select_options.as_ref().unwrap()[field.select_index].clone();
-                }
-            } else {
-                form.fields[form.step].move_cursor_right();
-            }
+            form.move_right();
         }
         KeyCode::Char(c) => {
             form.error = None;
-            if form.fields[form.step].select_options.is_some() {
-                return;
+            if let Err(e) = form.insert_current(c) {
+                form.error = Some(e.to_string());
             }
-            if c == ' ' && form.step != FieldIndex::Password as usize && form.step != FieldIndex::PrivateKey as usize {
-                form.error = Some("不能包含空格".to_string());
-                return;
-            }
-            if form.step == FieldIndex::Port as usize && !c.is_ascii_digit() {
-                form.error = Some("端口只能输入数字".to_string());
-                return;
-            }
-            form.fields[form.step].insert_char(c);
         }
         KeyCode::Backspace => {
             form.error = None;
-            if form.fields[form.step].select_options.is_none() {
-                form.fields[form.step].delete_char();
-            }
+            form.delete_current();
         }
         _ => {}
     }
@@ -718,18 +613,9 @@ fn handle_paste(state: &mut AppState, data: &str) {
     if state.form.is_some() {
         let form = state.form.as_mut().unwrap();
         form.error = None;
-        if form.fields[form.step].select_options.is_some() {
-            return;
+        if let Err(e) = form.insert_current_str(data) {
+            form.error = Some(e.to_string());
         }
-        if data.contains(' ') && form.step != FieldIndex::Password as usize && form.step != FieldIndex::PrivateKey as usize {
-            form.error = Some("不能包含空格".to_string());
-            return;
-        }
-        if form.step == FieldIndex::Port as usize && !data.chars().all(|c| c.is_ascii_digit()) {
-            form.error = Some("端口只能输入数字".to_string());
-            return;
-        }
-        form.fields[form.step].insert_str(data);
     } else if state.search_focused {
         state.search_input.push_str(data);
         reload_machines(state);

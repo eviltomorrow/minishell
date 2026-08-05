@@ -4,6 +4,7 @@ pub mod form;
 pub mod selector;
 pub mod styles;
 pub mod filebrowser;
+pub mod probe_state;
 
 use std::sync::Arc;
 use minishell_core::Machine;

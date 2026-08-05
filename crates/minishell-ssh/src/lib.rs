@@ -32,11 +32,38 @@ enum SessionEnd {
     Disconnected,
 }
 
+/// Drains every byte currently readable from `reader`, forwarding it to `out`.
+///
+/// This is the load-bearing correctness seam for the SSH read loop. It encodes
+/// the three ordering rules that prevent data loss with libssh2's internal
+/// buffering:
+///   1. Always drain — not gated on the raw-fd `poll()` reporting `POLLIN`,
+///      because libssh2 may have already consumed the kernel buffer.
+///   2. Only stop at `Ok(0)` (true EOF) — never at a transient EOF flag while
+///      bytes are still buffered.
+///   3. Return `Ok(false)` only when the reader reports `WouldBlock`, so the
+///      caller can check for hangup *after* draining.
+///
+/// Returns `true` when the source hit EOF, `false` after a `WouldBlock`.
+pub fn drain_reads(reader: &mut impl Read, out: &mut impl Write) -> std::io::Result<bool> {
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return Ok(true),
+            Ok(n) => {
+                out.write_all(&buf[..n])?;
+                out.flush()?;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn run_session_loop(channel: &mut ssh2::Channel, session: &ssh2::Session, session_fd: RawFd) -> SessionEnd {
     let stdin_fd = libc::STDIN_FILENO;
 
     let mut stdin_buf = [0u8; 4096];
-    let mut ssh_buf = [0u8; 4096];
     let mut stdout = std::io::stdout();
     let mut stdin = std::io::stdin();
     let mut last_keepalive = Instant::now();
@@ -74,16 +101,10 @@ fn run_session_loop(channel: &mut ssh2::Channel, session: &ssh2::Session, sessio
         // libssh2 may have data buffered internally even when poll()
         // on the raw socket fd returns no POLLIN (the kernel buffer
         // was already consumed by libssh2's transport layer).
-        loop {
-            match channel.read(&mut ssh_buf) {
-                Ok(0) => return SessionEnd::Normal,
-                Ok(n) => {
-                    let _ = stdout.write_all(&ssh_buf[..n]);
-                    let _ = stdout.flush();
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => return SessionEnd::Disconnected,
-            }
+        match drain_reads(channel, &mut stdout) {
+            Ok(true) => return SessionEnd::Normal,
+            Ok(false) => {}
+            Err(_) => return SessionEnd::Disconnected,
         }
 
         // Check disconnection AFTER draining any buffered data
