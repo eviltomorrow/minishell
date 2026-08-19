@@ -6,6 +6,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::layout::Position;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
@@ -356,6 +357,7 @@ fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let mut cursor_cell: Option<(u16, u16)> = None;
     let mut lines: Vec<Line> = Vec::new();
     for (i, field) in form_state.fields.iter().enumerate() {
         let style = if i == form_state.step { styles::form_field_style() } else { Style::default() };
@@ -378,10 +380,17 @@ fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
                 ]));
             }
         } else {
-            let cursor = if i == form_state.step { "▌" } else { " " };
+            if i == form_state.step {
+                let byte_pos = field.cursor_pos.min(field.value.len());
+                let prefix = &field.value[..byte_pos];
+                cursor_cell = Some((
+                    (inner.x + 13 + UnicodeWidthStr::width(prefix) as u16).min(area.right().saturating_sub(1)),
+                    inner.y + i as u16,
+                ));
+            }
             lines.push(Line::from(vec![
                 Span::styled(format!("{:>12} ", field.label), style),
-                Span::styled(format!("{}{}", field.value, cursor), style),
+                Span::styled(format!("{} ", field.value), style),
             ]));
         }
     }
@@ -406,6 +415,9 @@ fn render_form(f: &mut ratatui::Frame, area: Rect, form_state: &FormState) {
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+    if let Some((x, y)) = cursor_cell {
+        f.set_cursor_position(Position::new(x, y));
+    }
 }
 
 fn render_delete_confirm(f: &mut ratatui::Frame, area: Rect, target: &Machine) {
