@@ -7,6 +7,7 @@ edition.workspace = true
 minishell-core = { workspace = true }
 minishell-utils = { workspace = true }
 ssh2 = "0.9"
+openssl-sys = { workspace = true }
 anyhow = "1"
 dirs = "5"
 crossterm = "0.28"

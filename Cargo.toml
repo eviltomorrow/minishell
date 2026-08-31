@@ -24,3 +24,4 @@ minishell-ssh = { path = "crates/minishell-ssh" }
 minishell-tui = { path = "crates/minishell-tui" }
 minishell-xlsx = { path = "crates/minishell-xlsx" }
 minishell-server = { path = "crates/minishell-server" }
+openssl-sys = { version = "0.9", features = ["vendored"] }
