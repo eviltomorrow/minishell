@@ -16,6 +16,90 @@ extern "C" fn handle_sigwinch(_: i32) {
     RESIZE_FLAG.store(true, Ordering::SeqCst);
 }
 
+// ── Session liveness ────────────────────────────────────────────────────────
+//
+// A session whose path is silently black-holed (laptop sleep/wake, NAT or a
+// router dropping the flow without FIN/RST) never surfaces POLLHUP/POLLERR on
+// its own: the kernel retransmits unacknowledged data for ~15 minutes
+// (tcp_retries2) and default SO_KEEPALIVE does not probe until 2 hours idle.
+// The TUI then freezes with no prompt, and keystrokes vanish into a socket
+// that accepts them locally but never delivers them.
+//
+// libssh2 cannot detect this either: `libssh2_keepalive_send` silently swallows
+// EAGAIN and returns 0 whether or not anything was written (verified in
+// libssh2's keepalive.c), so its return value carries no liveness signal.
+//
+// The kernel therefore owns the detection. `TCP_USER_TIMEOUT` bounds how long
+// sent-but-unacknowledged data may sit before the socket is errored, and the
+// keepalive timers bound how long an idle connection may look alive without a
+// peer response. Together they turn an indefinite freeze into a `POLLERR` plus
+// reconnect prompt in well under a minute.
+pub const SOCK_KEEPALIVE_IDLE_SECS: u32 = 30;
+pub const SOCK_KEEPALIVE_INTVL_SECS: u32 = 10;
+pub const SOCK_KEEPALIVE_CNT: u32 = 3;
+pub const SOCK_USER_TIMEOUT_MS: u32 = 20_000;
+
+/// Application-level SSH keepalive interval. Keeps NAT/conntrack entries warm
+/// and guarantees in-flight data for `TCP_USER_TIMEOUT` to time out against,
+/// even on an otherwise idle shell.
+pub const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Upper bound on keystrokes buffered while the channel reports `WouldBlock`.
+/// Generous enough that a large paste on a momentarily busy link is never
+/// mistaken for a dead session, yet bounded so a black-holed socket cannot
+/// grow the buffer without limit. Reaching it means the session is not
+/// absorbing input at all — treat as dead.
+const MAX_PENDING_INPUT: usize = 1024 * 1024;
+
+fn setsockopt_int(fd: RawFd, level: libc::c_int, name: libc::c_int, value: libc::c_int) {
+    let _ = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            &value as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+}
+
+/// Arms the kernel-level dead-peer detection described above.
+///
+/// `TCP_USER_TIMEOUT` and the keepalive tunables are Linux/Android socket
+/// options; elsewhere only `SO_KEEPALIVE` is enabled, with system defaults.
+pub fn configure_liveness(tcp: &TcpStream) {
+    let fd = tcp.as_raw_fd();
+    setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        setsockopt_int(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            SOCK_USER_TIMEOUT_MS as libc::c_int,
+        );
+        setsockopt_int(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPIDLE,
+            SOCK_KEEPALIVE_IDLE_SECS as libc::c_int,
+        );
+        setsockopt_int(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPINTVL,
+            SOCK_KEEPALIVE_INTVL_SECS as libc::c_int,
+        );
+        setsockopt_int(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPCNT,
+            SOCK_KEEPALIVE_CNT as libc::c_int,
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct ConnectConfig {
     pub username: String,
@@ -60,6 +144,41 @@ pub fn drain_reads(reader: &mut impl Read, out: &mut impl Write) -> std::io::Res
     }
 }
 
+/// Writes as much of `pending` into `channel` as the channel will take,
+/// retaining everything else for the next call.
+///
+/// `Write::write_all` cannot be used here: the session is non-blocking, so when
+/// libssh2's send buffer fills, `write_all` returns `WouldBlock` after having
+/// already written an unknown prefix — which is how `let _ = write_all(..)`
+/// silently dropped keystrokes. Tracking the count ourselves keeps every byte.
+///
+/// A cleared `pending` means fully flushed; `WouldBlock` returns early with the
+/// remainder preserved.
+///
+/// No `Channel::flush` call accompanies this: in ssh2-rs it maps to
+/// `libssh2_channel_flush_ex`, which discards *received* data (banner/prompt),
+/// not outgoing data. Nothing in this module calls it.
+pub fn flush_pending(channel: &mut impl Write, pending: &mut Vec<u8>) -> std::io::Result<()> {
+    let mut written = 0usize;
+    while written < pending.len() {
+        match channel.write(&pending[written..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "SSH channel closed while writing",
+                ))
+            }
+            Ok(n) => written += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        }
+    }
+    if written > 0 {
+        pending.drain(..written);
+    }
+    Ok(())
+}
+
 fn run_session_loop(channel: &mut ssh2::Channel, session: &ssh2::Session, session_fd: RawFd) -> SessionEnd {
     let stdin_fd = libc::STDIN_FILENO;
 
@@ -67,12 +186,20 @@ fn run_session_loop(channel: &mut ssh2::Channel, session: &ssh2::Session, sessio
     let mut stdout = std::io::stdout();
     let mut stdin = std::io::stdin();
     let mut last_keepalive = Instant::now();
-    let keepalive_interval = Duration::from_secs(120);
+    // Keystrokes the channel could not accept yet (WouldBlock). Held across
+    // loop iterations so a busy send buffer never drops input.
+    let mut pending: Vec<u8> = Vec::new();
 
     loop {
-        if last_keepalive.elapsed() >= keepalive_interval {
-            let _ = session.keepalive_send();
-            last_keepalive = Instant::now();
+        // libssh2's keepalive has no reply watchdog (see the liveness notes at
+        // the top of this file), so this is only a NAT/keepalive nudge. It does
+        // report a real transport error though — the old `let _ = ...` also
+        // swallowed that.
+        if last_keepalive.elapsed() >= SSH_KEEPALIVE_INTERVAL {
+            match session.keepalive_send() {
+                Ok(_) => last_keepalive = Instant::now(),
+                Err(_) => return SessionEnd::Disconnected,
+            }
         }
 
         // Handle terminal resize
@@ -120,11 +247,21 @@ fn run_session_loop(channel: &mut ssh2::Channel, session: &ssh2::Session, sessio
             match stdin.read(&mut stdin_buf) {
                 Ok(0) => return SessionEnd::Normal,
                 Ok(n) => {
-                    let _ = channel.write_all(&stdin_buf[..n]);
-                    let _ = channel.flush();
+                    if pending.len() + n > MAX_PENDING_INPUT {
+                        // The channel is not absorbing input at all; a live
+                        // session would have drained these bytes long ago.
+                        return SessionEnd::Disconnected;
+                    }
+                    pending.extend_from_slice(&stdin_buf[..n]);
                 }
                 Err(_) => return SessionEnd::Normal,
             }
+        }
+
+        // Flush every iteration, not only after stdin: bytes buffered on a
+        // previous pass still need to reach the channel once it can take them.
+        if flush_pending(channel, &mut pending).is_err() {
+            return SessionEnd::Disconnected;
         }
     }
 }
@@ -149,6 +286,7 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
     // Reconnection loop — only retry if session was established and then lost
     let max_retries = 3;
     let mut retry = 0u32;
+    let mut last_error: Option<String> = None;
 
     loop {
         match outcome {
@@ -157,10 +295,17 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
                 retry += 1;
                 if retry > max_retries {
                     let _ = crossterm::terminal::disable_raw_mode();
-                    anyhow::bail!(
-                        "Connection lost. All {} reconnection attempts failed.",
-                        max_retries
-                    );
+                    match last_error {
+                        Some(e) => anyhow::bail!(
+                            "Connection lost. {} reconnection attempts failed (last error: {}).",
+                            max_retries,
+                            e
+                        ),
+                        None => anyhow::bail!(
+                            "Connection lost. All {} reconnection attempts failed.",
+                            max_retries
+                        ),
+                    }
                 }
                 let msg = format!(
                     "\r\n\x1b[2mConnection lost. Press any key to reconnect... (attempt {}/{})\x1b[0m\r\n",
@@ -181,10 +326,21 @@ pub fn connect(config: &ConnectConfig) -> Result<()> {
                 }
 
                 outcome = match prepare_session(config, &term) {
-                    Ok((mut ch, sess, fd)) => run_session_loop(&mut ch, &sess, fd),
+                    Ok((mut ch, sess, fd)) => {
+                        last_error = None;
+                        run_session_loop(&mut ch, &sess, fd)
+                    }
                     Err(e) => {
-                        let _ = crossterm::terminal::disable_raw_mode();
-                        return Err(e);
+                        // Do NOT abort here. Right after a laptop wakes, the
+                        // route is often not up yet, so the first reconnect
+                        // attempt can fail even though a retry a moment later
+                        // succeeds. Report it and fall through to the next
+                        // prompt instead of dropping the user back to the shell.
+                        let msg = format!("\r\n\x1b[31mReconnect failed: {e}\x1b[0m\r\n");
+                        let _ = std::io::stdout().write_all(msg.as_bytes());
+                        let _ = std::io::stdout().flush();
+                        last_error = Some(e.to_string());
+                        SessionEnd::Disconnected
                     }
                 };
             }
@@ -213,17 +369,7 @@ pub fn create_session(config: &ConnectConfig) -> Result<ssh2::Session> {
     for parsed_addr in &addrs {
         match TcpStream::connect_timeout(parsed_addr, config.timeout) {
             Ok(tcp) => {
-                let fd = tcp.as_raw_fd();
-                let keepalive: libc::c_int = 1;
-                let _ = unsafe {
-                    libc::setsockopt(
-                        fd,
-                        libc::SOL_SOCKET,
-                        libc::SO_KEEPALIVE,
-                        &keepalive as *const _ as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    )
-                };
+                configure_liveness(&tcp);
                 let mut session = ssh2::Session::new().context("Failed to create SSH session")?;
                 session.set_tcp_stream(tcp);
                 session.set_timeout(config.timeout.as_millis() as u32);
@@ -274,14 +420,16 @@ fn prepare_session(
     channel.shell().context("Failed to start shell")?;
 
     if config.device == "Linux" {
+        // The session is still blocking here, so write_all cannot return
+        // WouldBlock; no flush is needed (and Channel::flush would discard
+        // received data — see flush_pending).
         let _ = channel.write_all(
             format!("export PS1=\"[{}] $PS1\"\n", config.host).as_bytes(),
         );
-        let _ = channel.flush();
     }
 
     session.set_blocking(false);
-    session.set_keepalive(true, 120);
+    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL.as_secs() as u32);
 
     Ok((channel, session, session_fd))
 }
