@@ -35,6 +35,7 @@ All crates depend on `minishell-core`. `minishell-cli` depends on all 7 others.
 - **SSH I/O** uses raw `libc::poll()` on stdin_fd + session_fd (not threads as the design doc spec says)
 - **DB path**: `~/.minishell/db` (from `main.rs` `db_path()` — NOT `/tmp/minishell` as older docs claim)
 - **Store** uses `unchecked_transaction()` for batch imports, `INSERT OR IGNORE` (unique on ip+port)
+- **List order** is `ORDER BY num, id`; `resetnum` renumbers by `id`, `resort <column>` renumbers by a column
 - **Selector** (multi-match quick login) uses raw ANSI escape sequences inline, not ratatui
 - **Password/key visibility** toggleable with `s` key — column layout changes dynamically
 - **Edit form** sets empty fields to `"-"` sentinel; edit pre-fills from existing values
@@ -52,6 +53,7 @@ minishell export [path]
 minishell tpl [path]
 minishell version
 minishell resetnum           # reset num column sequentially from 1
+minishell resort <column>    # reorder by ip|nat|port|user|device|remark, renumber, optional --desc
 ```
 
 ## Version info

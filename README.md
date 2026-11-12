@@ -94,6 +94,15 @@ minishell show
 
 在终端打印所有机器的表格。
 
+### 按列重排
+
+```bash
+minishell resort ip            # 按 IP 升序重排
+minishell resort port --desc   # 按端口降序重排
+```
+
+按指定列排序后，把序号列 `#`（`num`）重编为 1..N，列表随即以新顺序显示。支持 `ip` / `nat` / `port` / `user` / `device` / `remark`；空值（空字符串或 `-`）始终排在最后。
+
 ### 查看版本
 
 ```bash

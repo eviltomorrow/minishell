@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use minishell_core::Machine;
-use minishell_store::Store;
+use minishell_store::{SortColumn, Store};
 use minishell_utils::{pad_left, pad_right};
 use unicode_width::UnicodeWidthStr;
 
@@ -46,6 +46,56 @@ enum Commands {
 
     /// Reset num column sequentially from 1
     Resetnum,
+
+    /// Reorder machines by a column and renumber them from 1
+    Resort {
+        /// Column to sort by
+        #[arg(value_enum)]
+        column: ResortColumn,
+
+        /// Sort descending
+        #[arg(long)]
+        desc: bool,
+    },
+}
+
+/// CLI-facing column names for `resort`, mapped onto the store's SQL columns.
+#[derive(Clone, Copy, ValueEnum)]
+enum ResortColumn {
+    Ip,
+    #[value(alias = "nat-ip", alias = "nat_ip")]
+    Nat,
+    Port,
+    #[value(alias = "username")]
+    User,
+    Device,
+    Remark,
+}
+
+impl ResortColumn {
+    fn label(self) -> &'static str {
+        match self {
+            ResortColumn::Ip => "ip",
+            ResortColumn::Nat => "nat",
+            ResortColumn::Port => "port",
+            ResortColumn::User => "user",
+            ResortColumn::Device => "device",
+            ResortColumn::Remark => "remark",
+        }
+    }
+}
+
+impl From<ResortColumn> for SortColumn {
+    fn from(value: ResortColumn) -> Self {
+        match value {
+            ResortColumn::Ip => SortColumn::Ip,
+            ResortColumn::Nat => SortColumn::NatIp,
+            ResortColumn::Port => SortColumn::Port,
+            ResortColumn::User => SortColumn::Username,
+            ResortColumn::Device => SortColumn::Device,
+            ResortColumn::Remark => SortColumn::Remark,
+        }
+    }
 }
 
 fn db_path() -> PathBuf {
@@ -180,6 +230,16 @@ fn run() -> Result<()> {
             let store = open_db()?;
             let count = store.reset_num()?;
             println!("Reset num for {} machines", count);
+        }
+        Some(Commands::Resort { column, desc }) => {
+            let store = open_db()?;
+            let count = store.resort(column.into(), desc)?;
+            println!(
+                "Resorted {} machines by {} ({})",
+                count,
+                column.label(),
+                if desc { "descending" } else { "ascending" }
+            );
         }
         None => {
             let store = open_db()?;
