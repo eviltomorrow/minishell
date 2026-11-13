@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::Path;
 use anyhow::{Result, Context};
 use minishell_core::Machine;
@@ -9,9 +10,10 @@ pub struct Store {
 
 /// A machine field that `resort` can order by.
 ///
-/// Ordering is applied in SQL so the database does the work; `num` is then
-/// renumbered 1..N in that order, which makes the new order the canonical one
-/// (`search` sorts by `num`).
+/// Text columns are ordered in SQL. IP columns are ordered in Rust with a
+/// natural (digit-aware) comparison, because a lexicographic sort puts
+/// `189.10.0.1` before `189.9.0.1`. `num` is then renumbered 1..N in that
+/// order, which makes the new order the canonical one (`search` sorts by `num`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
     Ip,
@@ -23,7 +25,7 @@ pub enum SortColumn {
 }
 
 impl SortColumn {
-    /// SQL fragment used as the `ORDER BY` clause.
+    /// SQL fragment used as the `ORDER BY` clause for non-IP columns.
     ///
     /// Empty fields (`''`/`'-'`) always sort last, in both directions, so a
     /// descending sort doesn't drag a wall of placeholders to the top. Ties
@@ -32,8 +34,9 @@ impl SortColumn {
         let dir = if desc { "DESC" } else { "ASC" };
         let name = match self {
             SortColumn::Port => return format!("(port IS NULL) ASC, port {dir}, id ASC"),
-            SortColumn::Ip => "ip",
-            SortColumn::NatIp => "nat_ip",
+            SortColumn::Ip | SortColumn::NatIp => {
+                unreachable!("IP columns use natural ordering in Rust")
+            }
             SortColumn::Username => "username",
             SortColumn::Device => "device",
             SortColumn::Remark => "remark",
@@ -42,6 +45,40 @@ impl SortColumn {
             "({name} IS NULL OR {name} = '' OR {name} = '-') ASC, {name} COLLATE NOCASE {dir}, id ASC"
         )
     }
+}
+
+/// One run of a naturally sorted value: either a number or a single character.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum NaturalSegment {
+    Number(u128),
+    Text(char),
+}
+
+/// Splits `value` into digits and single characters so `189.9` sorts before
+/// `189.10`. Numbers compare by value (so leading zeros are irrelevant) and
+/// text compares case-insensitively.
+fn natural_key(value: &str) -> Vec<NaturalSegment> {
+    let mut segments = Vec::new();
+    let mut digits = String::new();
+    for c in value.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        if !digits.is_empty() {
+            segments.push(NaturalSegment::Number(digits.parse().unwrap_or(u128::MAX)));
+            digits.clear();
+        }
+        segments.push(NaturalSegment::Text(c.to_ascii_lowercase()));
+    }
+    if !digits.is_empty() {
+        segments.push(NaturalSegment::Number(digits.parse().unwrap_or(u128::MAX)));
+    }
+    segments
+}
+
+fn is_blank_value(value: &str) -> bool {
+    value.is_empty() || value == "-"
 }
 
 impl Store {
@@ -153,13 +190,54 @@ impl Store {
     /// order. Because `search` sorts by `num`, the new order is immediately
     /// visible in the TUI, `show`, and the quick-login selector.
     pub fn resort(&self, column: SortColumn, desc: bool) -> Result<usize> {
-        let sql = format!("SELECT id FROM machines ORDER BY {}", column.order_clause(desc));
+        let ids = match column {
+            SortColumn::Ip | SortColumn::NatIp => self.natural_order_ids(column, desc)?,
+            _ => {
+                let sql = format!("SELECT id FROM machines ORDER BY {}", column.order_clause(desc));
+                let mut stmt = self.conn.prepare(&sql)?;
+                let ids = stmt
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                drop(stmt);
+                ids
+            }
+        };
+        self.renumber(&ids)
+    }
+
+    /// Orders ids by an IP-ish text column using `natural_key`.
+    ///
+    /// Empty placeholders (`''`/`'-'`) always come last, in both directions,
+    /// mirroring the SQL path. Ties fall back to `id` ascending.
+    fn natural_order_ids(&self, column: SortColumn, desc: bool) -> Result<Vec<i64>> {
+        let name = match column {
+            SortColumn::Ip => "ip",
+            SortColumn::NatIp => "nat_ip",
+            _ => unreachable!("only IP columns use natural ordering"),
+        };
+        let sql = format!("SELECT id, {name} FROM machines");
         let mut stmt = self.conn.prepare(&sql)?;
-        let ids: Vec<i64> = stmt
-            .query_map([], |row| row.get(0))?
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut rows: Vec<(i64, bool, Vec<NaturalSegment>)> = rows
+            .map(|row| {
+                let (id, value) = row?;
+                let value = value.unwrap_or_default();
+                Ok((id, is_blank_value(&value), natural_key(&value)))
+            })
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
-        self.renumber(&ids)
+
+        rows.sort_by(|(id_a, blank_a, key_a), (id_b, blank_b, key_b)| {
+            if blank_a != blank_b {
+                return if *blank_a { Ordering::Greater } else { Ordering::Less };
+            }
+            let ord = key_a.cmp(key_b);
+            let ord = if desc { ord.reverse() } else { ord };
+            ord.then(id_a.cmp(id_b))
+        });
+        Ok(rows.into_iter().map(|(id, _, _)| id).collect())
     }
 
     pub fn reset_num(&self) -> Result<usize> {
@@ -378,6 +456,51 @@ mod tests {
 
         assert_eq!(store.resort(SortColumn::Ip, true).unwrap(), 3);
         assert_order(&store, &["10.0.0.3", "10.0.0.2", "10.0.0.1"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resort_by_ip_is_natural_not_lexicographic() {
+        let (store, dir) = temp_store();
+        let machines = vec![
+            machine_with("189.10.0.1", "-", 22, "root", "Linux", "a"),
+            machine_with("189.9.0.1", "-", 22, "root", "Linux", "b"),
+            machine_with("189.100.0.1", "-", 22, "root", "Linux", "c"),
+            machine_with("10.0.0.1", "-", 22, "root", "Linux", "d"),
+        ];
+        store.import_machines(&machines).unwrap();
+
+        store.resort(SortColumn::Ip, false).unwrap();
+        assert_order(
+            &store,
+            &["10.0.0.1", "189.9.0.1", "189.10.0.1", "189.100.0.1"],
+        );
+
+        store.resort(SortColumn::Ip, true).unwrap();
+        assert_order(
+            &store,
+            &["189.100.0.1", "189.10.0.1", "189.9.0.1", "10.0.0.1"],
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resort_by_nat_ip_is_natural_and_keeps_placeholders_last() {
+        let (store, dir) = temp_store();
+        let machines = vec![
+            machine_with("10.0.0.1", "192.168.10.1", 22, "root", "Linux", "a"),
+            machine_with("10.0.0.2", "192.168.9.1", 22, "root", "Linux", "b"),
+            machine_with("10.0.0.3", "-", 22, "root", "Linux", "c"),
+        ];
+        store.import_machines(&machines).unwrap();
+
+        store.resort(SortColumn::NatIp, false).unwrap();
+        assert_order(&store, &["10.0.0.2", "10.0.0.1", "10.0.0.3"]);
+
+        store.resort(SortColumn::NatIp, true).unwrap();
+        assert_order(&store, &["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
